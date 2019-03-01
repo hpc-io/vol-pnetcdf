@@ -1,0 +1,35 @@
+VOL_INSTALL=/global/homes/j/junmin/cori/ECP/hdf5-dev/install/usr/local/
+
+VOL_SRC_INCLUDE=/global/homes/j/junmin/cori/ECP/hdf5-dev/hdf5/src/
+
+CC=/opt/cray/pe/craype/2.5.14/bin/cc
+LIBTOOL=ar -cvq
+
+TARGET=adios_vol_mpi
+
+CFLAGS=-I${VOL_SRC_INCLUDE} -I. -I ${VOL_INSTALL}/include
+
+OBJ=adios_vol.o main.o reader.o util.o hyperMap.o
+PLUGIN_LIBOBJS=adios_vol.o reader.o util.o hyperMap.o
+
+LIBS=${VOL_INSTALL}/lib/libhdf5.a	-lm -ldl 
+%.o: %.c 
+	$(CC) -g -c -o $@ $< $(CFLAGS)
+
+adios_vol_mpi:  ${OBJ}
+	${CC} -g -o $@ $^  ${LIBS}
+clean :
+	rm ${TARGET} *.o
+
+#libtool -static   -o libAdiosVol.a  adios_vol.o hyperMap.o reader.o util.o
+libAdiosVol.a: ${PLUGIN_LIBOBJS}
+	${LIBTOOL} -o $@ $^ 
+
+all: adios_vol_mpi libAdiosVol.a
+
+
+
+
+
+
+
