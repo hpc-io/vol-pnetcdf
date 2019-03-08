@@ -35,6 +35,20 @@
 /* Typedefs */
 /************/
 
+typedef enum {
+	NC_BYTE=1,	//=	\x00 \x00 \x00 \x01	//8-bit signed integers
+	NC_CHAR,		//=	\x00 \x00 \x00 \x02	//text characters
+	NC_SHORT,		//=	\x00 \x00 \x00 \x03	//16-bit signed integers
+	NC_INT,			//=	\x00 \x00 \x00 \x04	//32-bit signed integers
+	NC_FLOAT,		//=	\x00 \x00 \x00 \x05	//IEEE single precision floats
+	NC_DOUBLE,	//=	\x00 \x00 \x00 \x06	//IEEE double precision floats
+	NC_UBYTE,		//=	\x00 \x00 \x00 \x07	//unsigned 1 byte integer
+	NC_USHORT,	//=	\x00 \x00 \x00 \x08	//unsigned 2-byte integer
+	NC_UINT,		//=	\x00 \x00 \x00 \x09	//unsigned 4-byte integer
+	NC_INT64,		//=	\x00 \x00 \x00 \x0A	//signed 8-byte integer
+	NC_UINT64,	//=	\x00 \x00 \x00 \x0B	//unsigned 8-byte integer
+} cdf_nc_type_t;
+
 /* Assume non_neg is unsigned 64-bit int */
 typedef uint64_t cdf_non_neg_t;
 
@@ -51,13 +65,38 @@ typedef struct cdf_dim_t {
 	cdf_non_neg_t length;
 } cdf_dim_t;
 
+/* CDF attribute object (structure) */
+typedef struct cdf_att_t {
+	cdf_name_t *name;
+	cdf_nc_type_t nc_type;
+	cdf_non_neg_t nvals;
+	void *values;
+	int nc_type_size;
+} cdf_att_t;
+
+/* CDF variable object (structure) */
+typedef struct cdf_var_t {
+	cdf_name_t *name;
+	cdf_nc_type_t nc_type; /* var data type */
+	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
+	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
+                          * shape. We say this is a "record variable" if and only
+                          * if the first dimension is the record dimension.  */
+	cdf_non_neg_t natts; /* number of attributes for this var */
+	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
+} cdf_var_t;
+
 /* The CDF VOL info object */
 typedef struct H5VL_cdf_t {
 	int  fd; /* posix file object */
 	uint8_t fmt; /* CDF File Spec (1,2,5) */
 	cdf_non_neg_t numrecs; /* length of record dimension */
 	cdf_non_neg_t ndims; /* number of dimensions */
+	cdf_non_neg_t natts; /* number of attributes */
+	cdf_non_neg_t nvars; /* number of variables */
 	cdf_dim_t *dims; /* list of cdf_dim_t objects */
+	cdf_att_t *atts; /* list of cdf_att_t objects */
+	cdf_var_t *vars; /* list of cdf_var_t objects */
 } H5VL_cdf_t;
 
 /********************* */
@@ -74,8 +113,10 @@ static uint64_t get_uint64_t(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_non_neg_t get_non_neg(H5VL_cdf_t* file, off_t *rdoff);
 static uint8_t get_cdf_spec(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_name_t *get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff);
-static cdf_dim_t *get_cdf_dim_t(H5VL_cdf_t* file, off_t *rdoff);
-static void get_header_dim_list(H5VL_cdf_t* file, off_t *rdoff);
+static void *get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt);
+static cdf_dim_t *get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff);
+static cdf_att_t *get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff);
+static void get_header_list_item(H5VL_cdf_t* file, off_t *rdoff);
 
 /* "Management" callbacks */
 static herr_t H5VL_cdf_init(hid_t vipl_id);
@@ -198,12 +239,10 @@ static hid_t H5VL_CDF_g = H5I_INVALID_HID;
 static uint32_t
 bytestr_to_uint32_t(char *bytestr)
 {
-	/* Note: Little Endian Case */
+	/* Little Endian Case */
 	//uint32_t myInt1 = (uint32_t)bytestr[0] + ((uint32_t)bytestr[1] << 8) + ((uint32_t)bytestr[2] << 16) + ((uint32_t)bytestr[3] << 24);
 	/* Big Endian Case */
 	uint32_t myInt1 = ((uint32_t)bytestr[0] << 24) + ((uint32_t)bytestr[1] << 16) + ((uint32_t)bytestr[2] << 8) + (uint32_t)bytestr[3];
-	/* Print Result */
-	//printf("uint32_t value = %d (bytes = %d %d %d %d) \n", myInt1,(uint8_t)bytestr[0],(uint8_t)bytestr[1],(uint8_t)bytestr[2],(uint8_t)bytestr[3] );
 	return myInt1;
 }
 
@@ -213,8 +252,6 @@ bytestr_to_uint64_t(char *bytestr)
 {
 	/* Big Endian Case */
 	uint64_t myInt1 = ((uint64_t)bytestr[0] << 56) + ((uint64_t)bytestr[1] << 48) + ((uint64_t)bytestr[2] << 40) + ((uint64_t)bytestr[3] << 32) +  ((uint64_t)bytestr[4] << 24) + ((uint64_t)bytestr[5] << 16) + ((uint64_t)bytestr[6] << 8) + (uint64_t)bytestr[7];
-	/* Print Result */
-	//printf("uint32_t value = %llu (bytes = %d %d %d %d %d %d %d %d) \n", myInt1,(uint8_t)bytestr[0],(uint8_t)bytestr[1],(uint8_t)bytestr[2],(uint8_t)bytestr[3],(uint8_t)bytestr[4],(uint8_t)bytestr[5],(uint8_t)bytestr[6],(uint8_t)bytestr[7] );
 	return myInt1;
 }
 
@@ -223,6 +260,7 @@ get_uint32_t(H5VL_cdf_t* file, off_t *rdoff)
 {
 	char bytestr[4];
 	pread(file->fd, &bytestr[0], 4, *rdoff); *rdoff = *rdoff + 4;
+	//printf(" bytes: %d %d %d %d\n", (uint8_t)bytestr[0], (uint8_t)bytestr[1], (uint8_t)bytestr[2], (uint8_t)bytestr[3]);
 	return (uint64_t)bytestr_to_uint32_t( bytestr );
 }
 
@@ -268,7 +306,7 @@ get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff) {
 	printf("nelems check = %llu\n", name->nelems);
 
 	/* Populate padded byte count */
-	name->npadded = (cdf_non_neg_t)( (name->nelems/4) + ((name->nelems%4>0)?4:0) );
+	name->npadded = (cdf_non_neg_t)( (name->nelems/4)*4 + ((name->nelems%4>0)?4:0) );
 	printf("padded byte count = %d\n", (int)name->npadded);
 
 	/* Populate string of characters for the name */
@@ -285,37 +323,206 @@ get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff) {
 }
 
 static cdf_dim_t*
-get_cdf_dim_t(H5VL_cdf_t* file, off_t *rdoff) {
-	cdf_dim_t *dim;
-	dim = (cdf_dim_t *) calloc(1, sizeof(cdf_dim_t));
+get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff) {
+
+	cdf_dim_t *dims;
+	dims = (cdf_dim_t *) calloc(file->ndims, sizeof(cdf_dim_t));
+
 	/* Read through each of file->ndims dimension entries */
 	for(int idim=0;idim<file->ndims;idim++){
 		/* Get dimension name */
-		dim->name = get_cdf_name_t(file, rdoff);
+		dims[idim].name = get_cdf_name_t(file, rdoff);
 		/* Get dimension length */
-		dim->length = get_non_neg(file, rdoff);
-		printf("dim length = %llu\n", dim->length);
+		dims[idim].length = get_non_neg(file, rdoff);
+		//printf("dim length = %llu\n", dims[idim].length);
 	}
-	return dim;
+
+	return dims;
 }
 
+static void*
+get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
+
+	void *values;
+
+	switch(atts[iatt].nc_type) {
+
+		case 	NC_BYTE:	//=	\x00 \x00 \x00 \x01	//8-bit signed integers
+			printf("NC_TYPE for attribute %d is NC_BYTE\n",iatt);
+			atts[iatt].nc_type_size = 1;
+			break;
+		case 	NC_CHAR:		//=	\x00 \x00 \x00 \x02	//text characters
+			printf("NC_TYPE for attribute %d is NC_CHAR\n",iatt);
+			atts[iatt].nc_type_size = 1;
+			break;
+		case 	NC_SHORT:		//=	\x00 \x00 \x00 \x03	//16-bit signed integers
+			printf("NC_TYPE for attribute %d is NC_SHORT\n",iatt);
+			atts[iatt].nc_type_size = 2;
+			break;
+		case 	NC_INT:			//=	\x00 \x00 \x00 \x04	//32-bit signed integers
+			printf("NC_TYPE for attribute %d is NC_INT\n",iatt);
+			atts[iatt].nc_type_size = 4;
+			break;
+		case 	NC_FLOAT:		//=	\x00 \x00 \x00 \x05	//IEEE single precision floats
+			printf("NC_TYPE for attribute %d is NC_FLOAT\n",iatt);
+			atts[iatt].nc_type_size = 4;
+			break;
+		case 	NC_DOUBLE:	//=	\x00 \x00 \x00 \x06	//IEEE double precision floats
+			printf("NC_TYPE for attribute %d is NC_DOUBLE\n",iatt);
+			atts[iatt].nc_type_size = 8;
+			break;
+		case 	NC_UBYTE:		//=	\x00 \x00 \x00 \x07	//unsigned 1 byte integer
+			printf("NC_TYPE for attribute %d is NC_UBYTE\n",iatt);
+			atts[iatt].nc_type_size = 1;
+			break;
+		case 	NC_USHORT:	//=	\x00 \x00 \x00 \x08	//unsigned 2-byte integer
+			printf("NC_TYPE for attribute %d is NC_USHORT\n",iatt);
+			atts[iatt].nc_type_size = 2;
+			break;
+		case 	NC_UINT:		//=	\x00 \x00 \x00 \x09	//unsigned 4-byte integer
+			printf("NC_TYPE for attribute %d is NC_UINT\n",iatt);
+			atts[iatt].nc_type_size = 4;
+			break;
+		case 	NC_INT64:		//=	\x00 \x00 \x00 \x0A	//signed 8-byte integer
+			printf("NC_TYPE for attribute %d is NC_INT64\n",iatt);
+			atts[iatt].nc_type_size = 8;
+			break;
+		case 	NC_UINT64:	//=	\x00 \x00 \x00 \x0B	//unsigned 8-byte integer
+			printf("NC_TYPE for attribute %d is NC_UINT64\n",iatt);
+			atts[iatt].nc_type_size = 8;
+			break;
+		default :
+			printf("ERROR!! %d not a recognized nc_type\n", atts[iatt].nc_type);
+	}
+	values = (void *) calloc(atts[iatt].nvals, atts[iatt].nc_type_size);
+
+	/* Populate padded byte count */
+	cdf_non_neg_t valsize = atts[iatt].nc_type_size * atts[iatt].nvals;
+
+	cdf_non_neg_t npadded = (cdf_non_neg_t)( (valsize/4)*4 + ((valsize%4>0)?4:0) );
+	printf("padded byte count = %llu\n", npadded);
+
+	/* Populate values from bytes in file */
+	pread(file->fd, values, valsize, *rdoff); *rdoff = *rdoff + npadded;
+
+	/* Check Values */
+	char *tmp = (char *) calloc(valsize, sizeof(char));
+	memcpy(tmp, values, valsize);
+	printf("att values = ");
+	for (int c=0; c<valsize; c++){
+		printf("%c", tmp[c]);
+	}
+	printf("\n");
+	free(tmp);
+
+	return values;
+}
+
+static cdf_att_t*
+get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff) {
+
+	cdf_att_t *atts;
+	atts = (cdf_att_t *) calloc(file->natts, sizeof(cdf_att_t));
+
+	/* Read through each of file->natts dimension entries */
+	for(int iatt=0;iatt<file->natts;iatt++){
+
+		/* Get attribute name */
+		atts[iatt].name = get_cdf_name_t(file, rdoff);
+
+		/* Get attribute type */
+		atts[iatt].nc_type = get_uint32_t(file,rdoff);
+		printf("atts[%d].nc_type = %d\n", iatt, atts[iatt].nc_type);
+
+		/* Get number of attribute values */
+		atts[iatt].nvals = get_non_neg(file, rdoff);
+		printf("atts[%d].nvals = %llu\n", iatt, atts[iatt].nvals);
+
+		/* Read the attribute values */
+		atts[iatt].values = get_att_values(file, rdoff, atts, iatt);
+
+	}
+	return atts;
+
+}
+
+
+static cdf_var_t*
+get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
+
+	cdf_var_t *vars;
+	vars = (cdf_var_t *) calloc(file->nvars, sizeof(cdf_var_t));
+
+	/* Read through each of file->nvars variable entries */
+	for(int ivar=0;ivar<file->nvars;ivar++){
+
+		/* Get variable name */
+		vars[ivar].name = get_cdf_name_t(file, rdoff);
+
+		/* Get rank of this var (dimensionality) */
+		vars[ivar].dimrank = get_non_neg(file, rdoff);
+		printf("vars[%d].dimrank = %llu\n", ivar, vars[ivar].dimrank);
+
+		break;
+
+	// 	/* Get attribute type */
+	// 	atts[iatt].nc_type = get_uint32_t(file,rdoff);
+	// 	printf("atts[%d].nc_type = %d\n", iatt, atts[iatt].nc_type);
+	//
+	// 	/* Get number of attribute values */
+	// 	atts[iatt].nvals = get_non_neg(file, rdoff);
+	// 	printf("atts[%d].nvals = %llu\n", iatt, atts[iatt].nvals);
+	//
+	// 	/* Read the attribute values */
+	// 	atts[iatt].values = get_att_values(file, rdoff, atts, iatt);
+
+
+	}
+
+	return vars;
+}
+
+
 static void
-get_header_dim_list(H5VL_cdf_t* file, off_t *rdoff) {
+get_header_list_item(H5VL_cdf_t* file, off_t *rdoff) {
 
 	/* First check if first 4 bytes are 0 */
-	uint32_t nc_dim = get_uint32_t(file, rdoff);
-	if ( nc_dim > (uint32_t)0 ){
+	uint32_t nc_item = get_uint32_t(file, rdoff);
+	if ( nc_item > (uint32_t)0 ){
 
-		/* Make Sure these 4 bytes are "NC_DIMENSION" */
-		if ( nc_dim != (uint32_t)10 ) {
-			printf("ERROR - Expecting NC_DIMENSION (%d).\n", nc_dim);
+
+		/* "NC_DIMENSION" */
+		if ( nc_item == (uint32_t)10 ) {
+
+			/* Get nelems of dim_list (file->ndims) */
+			file->ndims = (uint64_t) get_non_neg(file, rdoff);
+
+			/* Populate list of dim objects */
+			file->dims = get_cdf_dims_t(file, rdoff);
+
+		/* "NC_VARIABLE" */
+	} else if ( nc_item == (uint32_t)11 ) {
+
+			/* Get nelems of var_list (file->nvars) */
+			file->nvars = (uint64_t) get_non_neg(file, rdoff);
+			printf("file->nvars = %llu\n", file->nvars);
+
+			/* Populate list of var objects */
+			file->vars = get_cdf_vars_t(file, rdoff);
+
+		/* "NC_ATTRIBUTE" */
+		} else if ( nc_item == (uint32_t)12 ) {
+
+			/* Get nelems of att_list (file->natts) */
+			file->natts = (uint64_t) get_non_neg(file, rdoff);
+			//printf("file->natts = %llu\n", file->natts);
+
+			/* Populate list of att objects */
+			file->atts = get_cdf_atts_t(file, rdoff);
+
+		} else {
+			printf("ERROR - Expecting NC_DIMENSION, NC_VARIABLE or NC_ATTRIBUTE not %d.\n", nc_item);
 		}
-
-		/* Get nelms of dim_list (file->ndims) */
-		file->ndims = (uint64_t) get_non_neg(file, rdoff);
-
-		/* Populate list of dim objects */
-		file->dims = get_cdf_dim_t(file, rdoff);
 
 	} else {
 		/* dim_list is ABSENT - Move rdoff by 4|8 bytes */
@@ -346,6 +553,7 @@ H5VL_cdf_new_obj(int fd)
     new_obj->fmt = 0;
     new_obj->numrecs = 0;
     new_obj->ndims = 0;
+    new_obj->natts = 0;
 
     return new_obj;
 } /* end H5VL__cdf_new_obj() */
@@ -366,11 +574,34 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 	/* Free name strings for each dimension */
 	for (int d=0; d<obj->ndims; d++){
 		free(obj->dims[d].name->string);
+		free(obj->dims[d].name);
+	}
+
+	/* Free values for each attribute */
+	for (int d=0; d<obj->ndims; d++){
+		free(obj->atts[d].name->string);
+		free(obj->atts[d].name);
+		free(obj->atts[d].values);
+	}
+
+	/* Free values for each variable */
+	for (int d=0; d<obj->nvars; d++){
+
+		/* TODO: Free child objects */
+
 	}
 
 	/* Free list of dimensions */
 	if (obj->ndims > 0)
 		free(obj->dims);
+
+	/* Free list of attributes */
+	if (obj->natts > 0)
+		free(obj->atts);
+
+	/* Free list of attributes */
+	if (obj->nvars > 0)
+		free(obj->vars);
 
 	/* Free vol object */
 	free(obj);
@@ -483,10 +714,13 @@ H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
 		/* Note: Above read will be "STREAMING" rather than "NON_NEG" if all bytes are \xFF */
 
 		/* Read dimension list (dim_list) */
-		get_header_dim_list(file, &rdoff);
+		get_header_list_item(file, &rdoff);
 
 		/* Read attribute list (att_list) */
-		//get_header_att_list(file, &rdoff);
+		get_header_list_item(file, &rdoff);
+
+		/* Read variable list (var_list) */
+		get_header_list_item(file, &rdoff);
 
 		return (void *)file;
 } /* end H5VL_cdf_file_open() */
