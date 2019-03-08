@@ -51,6 +51,7 @@ typedef enum {
 
 /* Assume non_neg is unsigned 64-bit int */
 typedef uint64_t cdf_non_neg_t;
+typedef uint64_t cdf_offset_t;
 
 /* CDF name object (structure) */
 typedef struct cdf_name_t {
@@ -77,6 +78,8 @@ typedef struct cdf_att_t {
 /* CDF variable object (structure) */
 typedef struct cdf_var_t {
 	cdf_name_t *name;
+	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
+	cdf_non_neg_t vsize; /* vsize */
 	cdf_nc_type_t nc_type; /* var data type */
 	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
@@ -104,6 +107,7 @@ typedef struct H5VL_cdf_t {
 /********************* */
 
 /* Helper routines */
+static void cdf_handle_error(char* errmsg, int lineno);
 static H5VL_cdf_t *H5VL_cdf_new_obj(int fd);
 static herr_t H5VL_cdf_free_obj(H5VL_cdf_t *obj);
 static uint32_t bytestr_to_uint32_t(char *bytestr);
@@ -111,12 +115,14 @@ static uint64_t bytestr_to_uint64_t(char *bytestr);
 static uint32_t get_uint32_t(H5VL_cdf_t* file, off_t *rdoff);
 static uint64_t get_uint64_t(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_non_neg_t get_non_neg(H5VL_cdf_t* file, off_t *rdoff);
+static cdf_offset_t get_offset(H5VL_cdf_t* file, off_t *rdoff);
 static uint8_t get_cdf_spec(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_name_t *get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff);
 static void *get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt);
 static cdf_dim_t *get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff);
-static cdf_att_t *get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff);
-static void get_header_list_item(H5VL_cdf_t* file, off_t *rdoff);
+static cdf_att_t *get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts);
+static void get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var);
+static herr_t cdf_read_header(H5VL_cdf_t* file);
 
 /* "Management" callbacks */
 static herr_t H5VL_cdf_init(hid_t vipl_id);
@@ -235,6 +241,13 @@ const H5VL_class_t H5VL_cdf_g = {
 /* The connector identification number, initialized at runtime */
 static hid_t H5VL_CDF_g = H5I_INVALID_HID;
 
+static void
+cdf_handle_error(char* errmsg, int lineno)
+{
+	fprintf(stderr, "CDF VOL Error at line %d of %s: %s\n", lineno, __FILE__, errmsg);
+	//MPI_Abort(MPI_COMM_WORLD, 1);
+}
+
 
 static uint32_t
 bytestr_to_uint32_t(char *bytestr)
@@ -292,6 +305,19 @@ get_non_neg(H5VL_cdf_t* file, off_t *rdoff)
 	} else {
 		/* NON_NEG = <non-negative INT64> = <64-bit signed integer, Bigendian, two's complement> */
 		return (cdf_non_neg_t) get_uint64_t(file,rdoff);
+	}
+}
+
+static cdf_offset_t
+get_offset(H5VL_cdf_t* file, off_t *rdoff)
+{
+	/* Read length of record dimension (numrecs) */
+	if (file->fmt < 2) {
+		/* NON_NEG = <non-negative INT> = <32-bit signed integer, Bigendian, two's complement> */
+		return (cdf_offset_t) get_uint32_t(file,rdoff);
+	} else {
+		/* NON_NEG = <non-negative INT64> = <64-bit signed integer, Bigendian, two's complement> */
+		return (cdf_offset_t) get_uint64_t(file,rdoff);
 	}
 }
 
@@ -419,13 +445,13 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 }
 
 static cdf_att_t*
-get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff) {
+get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts) {
 
 	cdf_att_t *atts;
-	atts = (cdf_att_t *) calloc(file->natts, sizeof(cdf_att_t));
+	atts = (cdf_att_t *) calloc(natts, sizeof(cdf_att_t));
 
 	/* Read through each of file->natts dimension entries */
-	for(int iatt=0;iatt<file->natts;iatt++){
+	for(int iatt=0;iatt<natts;iatt++){
 
 		/* Get attribute name */
 		atts[iatt].name = get_cdf_name_t(file, rdoff);
@@ -456,26 +482,39 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 	/* Read through each of file->nvars variable entries */
 	for(int ivar=0;ivar<file->nvars;ivar++){
 
+		// var	=	name nelems [dimid ...] vatt_list nc_type vsize begin
+
 		/* Get variable name */
 		vars[ivar].name = get_cdf_name_t(file, rdoff);
 
 		/* Get rank of this var (dimensionality) */
 		vars[ivar].dimrank = get_non_neg(file, rdoff);
 		printf("vars[%d].dimrank = %llu\n", ivar, vars[ivar].dimrank);
+		if (vars[ivar].dimrank > 0) {
+			vars[ivar].dimids = (cdf_non_neg_t *) calloc(vars[ivar].dimrank, sizeof(cdf_non_neg_t));
 
-		break;
+			/* Get dimid list */
+			for (int id=0; id<vars[ivar].dimrank; id++) {
+				vars[ivar].dimids[id] = get_non_neg(file, rdoff);
+				printf("vars[%d].dimids[%d] = %llu\n", ivar, id, vars[ivar].dimids[id]);
+			}
 
-	// 	/* Get attribute type */
-	// 	atts[iatt].nc_type = get_uint32_t(file,rdoff);
-	// 	printf("atts[%d].nc_type = %d\n", iatt, atts[iatt].nc_type);
-	//
-	// 	/* Get number of attribute values */
-	// 	atts[iatt].nvals = get_non_neg(file, rdoff);
-	// 	printf("atts[%d].nvals = %llu\n", iatt, atts[iatt].nvals);
-	//
-	// 	/* Read the attribute values */
-	// 	atts[iatt].values = get_att_values(file, rdoff, atts, iatt);
+		}
 
+		/* Populate vatt_list (attribute list for this var) */
+		get_header_list_item(file, rdoff, &vars[ivar]);
+
+		/* Get variable nc_type */
+		vars[ivar].nc_type = get_uint32_t(file,rdoff);
+		printf("vars[%d].nc_type = %d\n", ivar, vars[ivar].nc_type);
+
+		/* Get vsize */
+		vars[ivar].vsize = get_non_neg(file, rdoff);
+		printf("vars[%d].vsize = %llu\n", ivar, vars[ivar].vsize);
+
+		/* Get file offset (begin) */
+		vars[ivar].offset = get_offset(file, rdoff);
+		printf("vars[%d].offset = %llu\n", ivar, vars[ivar].offset);
 
 	}
 
@@ -484,7 +523,7 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 
 
 static void
-get_header_list_item(H5VL_cdf_t* file, off_t *rdoff) {
+get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 
 	/* First check if first 4 bytes are 0 */
 	uint32_t nc_item = get_uint32_t(file, rdoff);
@@ -513,12 +552,27 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff) {
 		/* "NC_ATTRIBUTE" */
 		} else if ( nc_item == (uint32_t)12 ) {
 
-			/* Get nelems of att_list (file->natts) */
-			file->natts = (uint64_t) get_non_neg(file, rdoff);
-			//printf("file->natts = %llu\n", file->natts);
+			/* File attribute */
+			if (var==NULL) {
 
-			/* Populate list of att objects */
-			file->atts = get_cdf_atts_t(file, rdoff);
+				/* Get nelems of att_list (file->natts) */
+				file->natts = (uint64_t) get_non_neg(file, rdoff);
+				//printf("file->natts = %llu\n", file->natts);
+
+				/* Populate list of att objects */
+				file->atts = get_cdf_atts_t(file, rdoff, file->natts);
+
+			/* Variable attribute */
+			} else {
+
+				/* Get nelems of att_list (file->natts) */
+				var->natts = (uint64_t) get_non_neg(file, rdoff);
+				//printf("file->natts = %llu\n", file->natts);
+
+				/* Populate list of att objects */
+				var->atts = get_cdf_atts_t(file, rdoff, var->natts);
+
+			}
 
 		} else {
 			printf("ERROR - Expecting NC_DIMENSION, NC_VARIABLE or NC_ATTRIBUTE not %d.\n", nc_item);
@@ -526,10 +580,13 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff) {
 
 	} else {
 		/* dim_list is ABSENT - Move rdoff by 4|8 bytes */
-		if (file->fmt < 5)
-			rdoff = rdoff + 4;
-		else
-			rdoff = rdoff + 8;
+		if (file->fmt < 5) {
+			*rdoff = *rdoff + 4;
+			printf("ABSENT. Moving forward 4 bytes.\n");
+		} else {
+			*rdoff = *rdoff + 8;
+			printf("ABSENT. Moving forward 8 bytes.\n");
+		}
 	}
 	return;
 }
@@ -578,7 +635,7 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 	}
 
 	/* Free values for each attribute */
-	for (int d=0; d<obj->ndims; d++){
+	for (int d=0; d<obj->natts; d++){
 		free(obj->atts[d].name->string);
 		free(obj->atts[d].name);
 		free(obj->atts[d].values);
@@ -586,9 +643,16 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 
 	/* Free values for each variable */
 	for (int d=0; d<obj->nvars; d++){
-
-		/* TODO: Free child objects */
-
+		if (obj->vars[d].dimrank > 0)
+			free(obj->vars[d].dimids);
+		free(obj->vars[d].name->string);
+		free(obj->vars[d].name);
+		for (int a=0; a<obj->vars[d].natts; a++){
+			free(obj->vars[d].atts[a].name->string);
+			free(obj->vars[d].atts[a].name);
+			free(obj->vars[d].atts[a].values);
+		}
+		free(obj->vars[d].atts);
 	}
 
 	/* Free list of dimensions */
@@ -609,6 +673,41 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 	return 0;
 } /* end H5VL_cdf_free_obj() */
 
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_read_header
+ *
+ * Purpose:     Read CDF-formatted file header & populate H5VL_cdf_t struct
+ *              for a given file.
+ *
+ * Return:      Success:    0
+ *              Failure:    -1
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+cdf_read_header(H5VL_cdf_t* file)
+{
+	herr_t retval=0;
+	off_t rdoff = 0;
+
+	/* Read "magic" part of header */
+	get_cdf_spec(file, &rdoff);
+
+	/* Read length of record dimension (numrecs) */
+	file->numrecs = get_non_neg(file, &rdoff);
+	/* Note: Above read will be "STREAMING" rather than "NON_NEG" if all bytes are \xFF */
+
+	/* Read dimension list (dim_list) */
+	get_header_list_item(file, &rdoff, NULL);
+
+	/* Read attribute list (att_list) */
+	get_header_list_item(file, &rdoff, NULL);
+
+	/* Read variable list (var_list) */
+	get_header_list_item(file, &rdoff, NULL);
+
+	return retval;
+}
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_register
@@ -694,33 +793,19 @@ static void *
 H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
     hid_t dxpl_id, void **req)
 {
-		int idim;
+
 		H5VL_cdf_info_t *info;
 		H5VL_cdf_t *file;
-		off_t rdoff = 0;
-		char bytes_sp[4];
-		char bytes_dp[8];
 
 		printf("------- CDF VOL FILE Open\n");
 
 		/* For now - Just using POSIX to prototype/test basic VOL */
 		file = H5VL_cdf_new_obj( open(name, O_RDONLY) );
 
-		/* Read "magic" part of header */
-		get_cdf_spec(file, &rdoff);
-
-		/* Read length of record dimension (numrecs) */
-		file->numrecs = get_non_neg(file, &rdoff);
-		/* Note: Above read will be "STREAMING" rather than "NON_NEG" if all bytes are \xFF */
-
-		/* Read dimension list (dim_list) */
-		get_header_list_item(file, &rdoff);
-
-		/* Read attribute list (att_list) */
-		get_header_list_item(file, &rdoff);
-
-		/* Read variable list (var_list) */
-		get_header_list_item(file, &rdoff);
+		/* Try Reading the Header */
+		if ( cdf_read_header(file) ) {
+			cdf_handle_error( "Failed to read CDF header.", __LINE__ );
+		}
 
 		return (void *)file;
 } /* end H5VL_cdf_file_open() */
