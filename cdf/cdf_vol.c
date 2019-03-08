@@ -22,7 +22,8 @@
 
 /* Whether to display log messages when callback is invoked */
 /* (Uncomment to enable) */
-/* #define ENABLE_CDF_LOGGING */
+#define ENABLE_CDF_LOGGING
+//#define ENABLE_CDF_VERBOSE
 
 /* Hack for missing va_copy() in old Visual Studio editions
  * (from H5win2_defs.h - used on VS2012 and earlier)
@@ -49,7 +50,7 @@ typedef enum {
 	NC_UINT64,	//=	\x00 \x00 \x00 \x0B	//unsigned 8-byte integer
 } cdf_nc_type_t;
 
-/* Assume non_neg is unsigned 64-bit int */
+/* Assume non_neg and offsets are unsigned 64-bit int */
 typedef uint64_t cdf_non_neg_t;
 typedef uint64_t cdf_offset_t;
 
@@ -241,6 +242,14 @@ const H5VL_class_t H5VL_cdf_g = {
 /* The connector identification number, initialized at runtime */
 static hid_t H5VL_CDF_g = H5I_INVALID_HID;
 
+/*-------------------------------------------------------------------------
+ * Function:    cdf_handle_error
+ *
+ * Purpose:     Error-handler helper routine.
+ *
+ * Return:      Void.
+ *-------------------------------------------------------------------------
+ */
 static void
 cdf_handle_error(char* errmsg, int lineno)
 {
@@ -248,7 +257,14 @@ cdf_handle_error(char* errmsg, int lineno)
 	//MPI_Abort(MPI_COMM_WORLD, 1);
 }
 
-
+/*-------------------------------------------------------------------------
+ * Function:    bytestr_to_uint32_t
+ *
+ * Purpose:     Convert 4-character byte string to uint32_t (Big Endian)
+ *
+ * Return:      uint32_t value.
+ *-------------------------------------------------------------------------
+ */
 static uint32_t
 bytestr_to_uint32_t(char *bytestr)
 {
@@ -259,7 +275,14 @@ bytestr_to_uint32_t(char *bytestr)
 	return myInt1;
 }
 
-
+/*-------------------------------------------------------------------------
+ * Function:    bytestr_to_uint64_t
+ *
+ * Purpose:     Convert 8-character byte string to uint64_t (Big Endian)
+ *
+ * Return:      uint64_t value.
+ *-------------------------------------------------------------------------
+ */
 static uint64_t
 bytestr_to_uint64_t(char *bytestr)
 {
@@ -268,15 +291,35 @@ bytestr_to_uint64_t(char *bytestr)
 	return myInt1;
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_uint32_t
+ *
+ * Purpose:     Parse file header to get an uint32_t value from 4 consecutive
+ *              bytes. File storage is "Big Endian"
+ *
+ * Return:      uint32_t value.
+ *-------------------------------------------------------------------------
+ */
 static uint32_t
 get_uint32_t(H5VL_cdf_t* file, off_t *rdoff)
 {
 	char bytestr[4];
 	pread(file->fd, &bytestr[0], 4, *rdoff); *rdoff = *rdoff + 4;
-	//printf(" bytes: %d %d %d %d\n", (uint8_t)bytestr[0], (uint8_t)bytestr[1], (uint8_t)bytestr[2], (uint8_t)bytestr[3]);
+#ifdef ENABLE_CDF_VERBOSE
+	printf(" bytes: %d %d %d %d\n", (uint8_t)bytestr[0], (uint8_t)bytestr[1], (uint8_t)bytestr[2], (uint8_t)bytestr[3]);
+#endif
 	return (uint64_t)bytestr_to_uint32_t( bytestr );
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_uint64_t
+ *
+ * Purpose:     Parse file header to get an uint64_t value from 8 consecutive
+ *              bytes. File storage is "Big Endian"
+ *
+ * Return:      uint64_t value.
+ *-------------------------------------------------------------------------
+ */
 static uint64_t
 get_uint64_t(H5VL_cdf_t* file, off_t *rdoff)
 {
@@ -285,16 +328,34 @@ get_uint64_t(H5VL_cdf_t* file, off_t *rdoff)
 	return bytestr_to_uint64_t( bytestr );
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_cdf_spec
+ *
+ * Purpose:     Parse file header to get the CDF-? specification version.
+ *
+ * Return:      uint8_t Specification version.
+ *-------------------------------------------------------------------------
+ */
 static uint8_t
 get_cdf_spec(H5VL_cdf_t* file, off_t *rdoff)
 {
 	char bytestr[4];
 	pread(file->fd, &bytestr[0], 4, *rdoff); *rdoff = *rdoff + 4;
 	file->fmt = (uint8_t) bytestr[3];
+#ifdef ENABLE_CDF_LOGGING
 	printf("------- (FILE FORMAT = %c%c%c-%d) \n", bytestr[0], bytestr[1], bytestr[2], (uint8_t) bytestr[3]);
+#endif
 	return (uint8_t) bytestr[3];
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_non_neg
+ *
+ * Purpose:     Parse file header to get a NON_NEG value.
+ *
+ * Return:      cdf_non_neg_t value.
+ *-------------------------------------------------------------------------
+ */
 static cdf_non_neg_t
 get_non_neg(H5VL_cdf_t* file, off_t *rdoff)
 {
@@ -308,6 +369,14 @@ get_non_neg(H5VL_cdf_t* file, off_t *rdoff)
 	}
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_offset
+ *
+ * Purpose:     Parse file header to get the offset value for a variable
+ *
+ * Return:      cdf_offset_t value.
+ *-------------------------------------------------------------------------
+ */
 static cdf_offset_t
 get_offset(H5VL_cdf_t* file, off_t *rdoff)
 {
@@ -321,6 +390,14 @@ get_offset(H5VL_cdf_t* file, off_t *rdoff)
 	}
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    cdf_name_t
+ *
+ * Purpose:     Parse file header to get a cdf_name_t object
+ *
+ * Return:      Pointer to single cdf_name_t object.
+ *-------------------------------------------------------------------------
+ */
 static cdf_name_t*
 get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff) {
 
@@ -329,25 +406,39 @@ get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff) {
 
 	/* Populate nelems */
 	name->nelems = get_non_neg(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 	printf("nelems check = %llu\n", name->nelems);
+#endif
 
 	/* Populate padded byte count */
 	name->npadded = (cdf_non_neg_t)( (name->nelems/4)*4 + ((name->nelems%4>0)?4:0) );
+#ifdef ENABLE_CDF_VERBOSE
 	printf("padded byte count = %d\n", (int)name->npadded);
+#endif
 
 	/* Populate string of characters for the name */
 	name->string = (char *) malloc((name->nelems) * sizeof(char));
 	pread(file->fd, name->string, name->nelems, *rdoff); *rdoff = *rdoff + name->npadded;
 
+#ifdef ENABLE_CDF_VERBOSE
 	printf("namestr = ");
 	for (int c=0; c<name->nelems; c++){
 		printf("%c", name->string[c]);
 	}
 	printf("\n");
+#endif
 
 	return name;
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_cdf_dims_t
+ *
+ * Purpose:     Parse file header to generate list of cdf_dim_t objects.
+ *
+ * Return:      Pointer to cdf_dim_t list.
+ *-------------------------------------------------------------------------
+ */
 static cdf_dim_t*
 get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff) {
 
@@ -360,12 +451,19 @@ get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff) {
 		dims[idim].name = get_cdf_name_t(file, rdoff);
 		/* Get dimension length */
 		dims[idim].length = get_non_neg(file, rdoff);
-		//printf("dim length = %llu\n", dims[idim].length);
 	}
 
 	return dims;
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_att_values
+ *
+ * Purpose:     Parse file header to generate "value" buffer.
+ *
+ * Return:      Pointer to void "value" buffer.
+ *-------------------------------------------------------------------------
+ */
 static void*
 get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 
@@ -374,47 +472,69 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 	switch(atts[iatt].nc_type) {
 
 		case 	NC_BYTE:	//=	\x00 \x00 \x00 \x01	//8-bit signed integers
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_BYTE\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 1;
 			break;
 		case 	NC_CHAR:		//=	\x00 \x00 \x00 \x02	//text characters
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_CHAR\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 1;
 			break;
 		case 	NC_SHORT:		//=	\x00 \x00 \x00 \x03	//16-bit signed integers
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_SHORT\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 2;
 			break;
 		case 	NC_INT:			//=	\x00 \x00 \x00 \x04	//32-bit signed integers
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_INT\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 4;
 			break;
 		case 	NC_FLOAT:		//=	\x00 \x00 \x00 \x05	//IEEE single precision floats
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_FLOAT\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 4;
 			break;
 		case 	NC_DOUBLE:	//=	\x00 \x00 \x00 \x06	//IEEE double precision floats
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_DOUBLE\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 8;
 			break;
 		case 	NC_UBYTE:		//=	\x00 \x00 \x00 \x07	//unsigned 1 byte integer
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_UBYTE\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 1;
 			break;
 		case 	NC_USHORT:	//=	\x00 \x00 \x00 \x08	//unsigned 2-byte integer
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_USHORT\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 2;
 			break;
 		case 	NC_UINT:		//=	\x00 \x00 \x00 \x09	//unsigned 4-byte integer
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_UINT\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 4;
 			break;
 		case 	NC_INT64:		//=	\x00 \x00 \x00 \x0A	//signed 8-byte integer
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_INT64\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 8;
 			break;
 		case 	NC_UINT64:	//=	\x00 \x00 \x00 \x0B	//unsigned 8-byte integer
+#ifdef ENABLE_CDF_VERBOSE
 			printf("NC_TYPE for attribute %d is NC_UINT64\n",iatt);
+#endif
 			atts[iatt].nc_type_size = 8;
 			break;
 		default :
@@ -426,11 +546,15 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 	cdf_non_neg_t valsize = atts[iatt].nc_type_size * atts[iatt].nvals;
 
 	cdf_non_neg_t npadded = (cdf_non_neg_t)( (valsize/4)*4 + ((valsize%4>0)?4:0) );
+#ifdef ENABLE_CDF_VERBOSE
 	printf("padded byte count = %llu\n", npadded);
+#endif
 
 	/* Populate values from bytes in file */
 	pread(file->fd, values, valsize, *rdoff); *rdoff = *rdoff + npadded;
 
+
+#ifdef ENABLE_CDF_VERBOSE
 	/* Check Values */
 	char *tmp = (char *) calloc(valsize, sizeof(char));
 	memcpy(tmp, values, valsize);
@@ -440,10 +564,19 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 	}
 	printf("\n");
 	free(tmp);
+#endif
 
 	return values;
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    get_cdf_atts_t
+ *
+ * Purpose:     Parse file header to generate list of cdf_att_t objects.
+ *
+ * Return:      Pointer to cdf_att_t list.
+ *-------------------------------------------------------------------------
+ */
 static cdf_att_t*
 get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts) {
 
@@ -458,11 +591,15 @@ get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts) {
 
 		/* Get attribute type */
 		atts[iatt].nc_type = get_uint32_t(file,rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("atts[%d].nc_type = %d\n", iatt, atts[iatt].nc_type);
+#endif
 
 		/* Get number of attribute values */
 		atts[iatt].nvals = get_non_neg(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("atts[%d].nvals = %llu\n", iatt, atts[iatt].nvals);
+#endif
 
 		/* Read the attribute values */
 		atts[iatt].values = get_att_values(file, rdoff, atts, iatt);
@@ -472,7 +609,14 @@ get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts) {
 
 }
 
-
+/*-------------------------------------------------------------------------
+ * Function:    get_cdf_vars_t
+ *
+ * Purpose:     Parse file header to generate list of cdf_var_t objects.
+ *
+ * Return:      Pointer to cdf_var_t list.
+ *-------------------------------------------------------------------------
+ */
 static cdf_var_t*
 get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 
@@ -482,21 +626,27 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 	/* Read through each of file->nvars variable entries */
 	for(int ivar=0;ivar<file->nvars;ivar++){
 
-		// var	=	name nelems [dimid ...] vatt_list nc_type vsize begin
+		/* Specification:
+		 * var	=	name nelems [dimid ...] vatt_list nc_type vsize begin
+		 */
 
 		/* Get variable name */
 		vars[ivar].name = get_cdf_name_t(file, rdoff);
 
 		/* Get rank of this var (dimensionality) */
 		vars[ivar].dimrank = get_non_neg(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("vars[%d].dimrank = %llu\n", ivar, vars[ivar].dimrank);
+#endif
 		if (vars[ivar].dimrank > 0) {
 			vars[ivar].dimids = (cdf_non_neg_t *) calloc(vars[ivar].dimrank, sizeof(cdf_non_neg_t));
 
 			/* Get dimid list */
 			for (int id=0; id<vars[ivar].dimrank; id++) {
 				vars[ivar].dimids[id] = get_non_neg(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 				printf("vars[%d].dimids[%d] = %llu\n", ivar, id, vars[ivar].dimids[id]);
+#endif
 			}
 
 		}
@@ -506,22 +656,37 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 
 		/* Get variable nc_type */
 		vars[ivar].nc_type = get_uint32_t(file,rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("vars[%d].nc_type = %d\n", ivar, vars[ivar].nc_type);
+#endif
 
 		/* Get vsize */
 		vars[ivar].vsize = get_non_neg(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("vars[%d].vsize = %llu\n", ivar, vars[ivar].vsize);
+#endif
 
 		/* Get file offset (begin) */
 		vars[ivar].offset = get_offset(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("vars[%d].offset = %llu\n", ivar, vars[ivar].offset);
+#endif
 
 	}
 
 	return vars;
 }
 
-
+/*-------------------------------------------------------------------------
+ * Function:    get_header_list_item
+ *
+ * Purpose:     Parse a list item (dim_list, att_list, var_list)
+ *              from the header. If var==NULL, the list item is attached to
+ *              the parent H5VL_cdf_t (file) object.
+ *
+ * Return:      Void
+ *-------------------------------------------------------------------------
+ */
 static void
 get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 
@@ -544,7 +709,9 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 
 			/* Get nelems of var_list (file->nvars) */
 			file->nvars = (uint64_t) get_non_neg(file, rdoff);
+#ifdef ENABLE_CDF_VERBOSE
 			printf("file->nvars = %llu\n", file->nvars);
+#endif
 
 			/* Populate list of var objects */
 			file->vars = get_cdf_vars_t(file, rdoff);
@@ -582,10 +749,14 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 		/* dim_list is ABSENT - Move rdoff by 4|8 bytes */
 		if (file->fmt < 5) {
 			*rdoff = *rdoff + 4;
+#ifdef ENABLE_CDF_VERBOSE
 			printf("ABSENT. Moving forward 4 bytes.\n");
+#endif
 		} else {
 			*rdoff = *rdoff + 8;
+#ifdef ENABLE_CDF_VERBOSE
 			printf("ABSENT. Moving forward 8 bytes.\n");
+#endif
 		}
 	}
 	return;
@@ -678,7 +849,8 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
  * Function:    H5VL_cdf_read_header
  *
  * Purpose:     Read CDF-formatted file header & populate H5VL_cdf_t struct
- *              for a given file.
+ *              for a given file. Assume formatting according to:
+ *              http://cucis.ece.northwestern.edu/projects/PnetCDF/CDF-5.html
  *
  * Return:      Success:    0
  *              Failure:    -1
@@ -746,7 +918,9 @@ static herr_t
 H5VL_cdf_init(hid_t vipl_id)
 {
 
+#ifdef ENABLE_CDF_LOGGING
     printf("------- CDF VOL INIT\n");
+#endif
 
     /* Shut compiler up about unused parameter */
     vipl_id = vipl_id;
@@ -771,7 +945,9 @@ static herr_t
 H5VL_cdf_term(void)
 {
 
+#ifdef ENABLE_CDF_LOGGING
     printf("------- CDF VOL TERM\n");
+#endif
 
     /* Reset VOL ID */
     H5VL_CDF_g = H5I_INVALID_HID;
@@ -797,7 +973,9 @@ H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
 		H5VL_cdf_info_t *info;
 		H5VL_cdf_t *file;
 
+#ifdef ENABLE_CDF_LOGGING
 		printf("------- CDF VOL FILE Open\n");
+#endif
 
 		/* For now - Just using POSIX to prototype/test basic VOL */
 		file = H5VL_cdf_new_obj( open(name, O_RDONLY) );
@@ -826,7 +1004,9 @@ H5VL_cdf_file_close(void *file, hid_t dxpl_id, void **req)
     H5VL_cdf_t *o = (H5VL_cdf_t *)file;
     herr_t ret_value;
 
+#ifdef ENABLE_CDF_LOGGING
     printf("------- CDF VOL FILE Close\n");
+#endif
 
     /* For now - Just using POSIX to prototype/test basic VOL */
     ret_value = close(o->fd);
