@@ -92,7 +92,6 @@ typedef struct cdf_var_t {
 
 /* The CDF VOL info object */
 typedef struct H5VL_cdf_t {
-	int  fd; /* posix file object */
 	uint8_t fmt; /* CDF File Spec (1,2,5) */
 	cdf_non_neg_t numrecs; /* length of record dimension */
 	cdf_non_neg_t ndims; /* number of dimensions */
@@ -101,7 +100,19 @@ typedef struct H5VL_cdf_t {
 	cdf_dim_t *dims; /* list of cdf_dim_t objects */
 	cdf_att_t *atts; /* list of cdf_att_t objects */
 	cdf_var_t *vars; /* list of cdf_var_t objects */
+#ifdef H5_HAVE_PARALLEL
+	MPI_File fh; /* MPI File Handle */
+	MPI_Comm comm; /* MPI Communicator */
+	MPI_Comm info; /* MPI Info */
+	MPI_Comm rank; /* MPI Rank */
+	MPI_Offset size; /* Total Size of read-only file */
+	char *cache; /* In-memory cache for parsing header (size = H5VL_CDF_CACHE_SIZE) */
+	MPI_Offset cache_offset; /* What is the file offset for first byte of cache */
+#else
+	int fd; /* posix file object */
+#endif
 } H5VL_cdf_t;
+
 
 /********************* */
 /* Function prototypes */
@@ -109,7 +120,11 @@ typedef struct H5VL_cdf_t {
 
 /* Helper routines */
 static void cdf_handle_error(char* errmsg, int lineno);
+#ifdef H5_HAVE_PARALLEL
+static H5VL_cdf_t *H5VL_cdf_new_obj_mpio(MPI_File fh, hid_t acc_tpl);
+#else
 static H5VL_cdf_t *H5VL_cdf_new_obj(int fd);
+#endif
 static herr_t H5VL_cdf_free_obj(H5VL_cdf_t *obj);
 static uint32_t bytestr_to_uint32_t(char *bytestr);
 static uint64_t bytestr_to_uint64_t(char *bytestr);
@@ -124,6 +139,7 @@ static cdf_dim_t *get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_att_t *get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts);
 static void get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var);
 static herr_t cdf_read_header(H5VL_cdf_t* file);
+static herr_t cdf_cache_read(H5VL_cdf_t* file, off_t *rdoff, char *buf, MPI_Offset count);
 
 /* "Management" callbacks */
 static herr_t H5VL_cdf_init(hid_t vipl_id);
@@ -242,6 +258,69 @@ const H5VL_class_t H5VL_cdf_g = {
 /* The connector identification number, initialized at runtime */
 static hid_t H5VL_CDF_g = H5I_INVALID_HID;
 
+#ifdef H5_HAVE_PARALLEL
+/*-------------------------------------------------------------------------
+ * Function:    cdf_cache_read
+ *
+ * Purpose:     Get required data from cache - If needed, advance the cache by
+ *              reading to the cache on rank 0 and broadcasting the data to
+ *              the other ranks.
+ *
+ * Return:      Success:    0
+ *              Failure:    -1
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+cdf_cache_read(H5VL_cdf_t* file, off_t *rdoff, char *buf, MPI_Offset count)
+{
+	MPI_Status status;
+	MPI_Offset extent_want, extent_have;
+	MPI_Offset offset;
+	MPI_Offset rdsize;
+	herr_t retval=0;
+
+	if (count > H5VL_CDF_CACHE_SIZE) {
+		printf("ERROR!! Cannot handle count = %llu.\n",count);
+	}
+
+	if (file->cache_offset < 0) {
+
+			rdsize = H5VL_CFD_MIN( H5VL_CDF_CACHE_SIZE, (file->size)-(file->cache_offset) );
+			printf("Initializing cache to size = %llu\n", rdsize);
+			file->cache_offset = 0;
+			if (file->rank==0)
+				MPI_File_read_at( file->fh, file->cache_offset, file->cache, rdsize, MPI_BYTE, &status );
+			MPI_Bcast( file->cache, rdsize, MPI_BYTE, 0, file->comm );
+
+	} else {
+
+		extent_want = ((MPI_Offset)(*rdoff)) + count;
+		extent_have = file->cache_offset + H5VL_CDF_CACHE_SIZE;
+		if( extent_want > extent_have ) {
+
+			rdsize = H5VL_CFD_MIN( H5VL_CDF_CACHE_SIZE, (file->size)-(file->cache_offset) );
+			printf("Advancing cache by %llu\n", rdsize);
+			file->cache_offset = file->cache_offset + H5VL_CDF_CACHE_SIZE;
+
+			/* Advance cache by reading first H5VL_CDF_CACHE_SIZE from file,
+			 * and bcasting the data to the other ranks.
+			 */
+			if (file->rank==0)
+				MPI_File_read_at( file->fh, file->cache_offset, file->cache, rdsize, MPI_BYTE, &status );
+			MPI_Bcast( file->cache, rdsize, MPI_BYTE, 0, file->comm );
+
+		}
+
+	}
+
+	/* "Read" (memcopy) necessary data */
+	offset = (MPI_Offset)(*rdoff) - file->cache_offset;
+	memcpy(buf, &file->cache[offset], count);
+
+	return retval;
+}
+#endif
+
 /*-------------------------------------------------------------------------
  * Function:    cdf_handle_error
  *
@@ -304,7 +383,12 @@ static uint32_t
 get_uint32_t(H5VL_cdf_t* file, off_t *rdoff)
 {
 	char bytestr[4];
-	pread(file->fd, &bytestr[0], 4, *rdoff); *rdoff = *rdoff + 4;
+#ifdef H5_HAVE_PARALLEL
+		cdf_cache_read(file, rdoff, &bytestr[0], 4);
+#else
+		pread(file->fd, &bytestr[0], 4, *rdoff);
+#endif
+	*rdoff = *rdoff + 4;
 #ifdef ENABLE_CDF_VERBOSE
 	printf(" bytes: %d %d %d %d\n", (uint8_t)bytestr[0], (uint8_t)bytestr[1], (uint8_t)bytestr[2], (uint8_t)bytestr[3]);
 #endif
@@ -324,7 +408,12 @@ static uint64_t
 get_uint64_t(H5VL_cdf_t* file, off_t *rdoff)
 {
 	char bytestr[8];
-	pread(file->fd, &bytestr[0], 8, *rdoff); *rdoff = *rdoff + 8;
+#ifdef H5_HAVE_PARALLEL
+		cdf_cache_read(file, rdoff, &bytestr[0], 8);
+#else
+		pread(file->fd, &bytestr[0], 8, *rdoff);
+#endif
+	*rdoff = *rdoff + 8;
 	return bytestr_to_uint64_t( bytestr );
 }
 
@@ -340,7 +429,12 @@ static uint8_t
 get_cdf_spec(H5VL_cdf_t* file, off_t *rdoff)
 {
 	char bytestr[4];
-	pread(file->fd, &bytestr[0], 4, *rdoff); *rdoff = *rdoff + 4;
+#ifdef H5_HAVE_PARALLEL
+		cdf_cache_read(file, rdoff, &bytestr[0], 4);
+#else
+		pread(file->fd, &bytestr[0], 4, *rdoff);
+#endif
+	*rdoff = *rdoff + 4;
 	file->fmt = (uint8_t) bytestr[3];
 #ifdef ENABLE_CDF_LOGGING
 	printf("------- (FILE FORMAT = %c%c%c-%d) \n", bytestr[0], bytestr[1], bytestr[2], (uint8_t) bytestr[3]);
@@ -418,7 +512,12 @@ get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff) {
 
 	/* Populate string of characters for the name */
 	name->string = (char *) malloc((name->nelems) * sizeof(char));
-	pread(file->fd, name->string, name->nelems, *rdoff); *rdoff = *rdoff + name->npadded;
+#ifdef H5_HAVE_PARALLEL
+	cdf_cache_read(file, rdoff, name->string, name->nelems);
+#else
+	pread(file->fd, name->string, name->nelems, *rdoff);
+#endif
+	*rdoff = *rdoff + name->npadded;
 
 #ifdef ENABLE_CDF_VERBOSE
 	printf("namestr = ");
@@ -551,7 +650,12 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 #endif
 
 	/* Populate values from bytes in file */
-	pread(file->fd, values, valsize, *rdoff); *rdoff = *rdoff + npadded;
+#ifdef H5_HAVE_PARALLEL
+		cdf_cache_read(file, rdoff, values, valsize);
+#else
+		pread(file->fd, values, valsize, *rdoff);
+#endif
+	*rdoff = *rdoff + npadded;
 
 
 #ifdef ENABLE_CDF_VERBOSE
@@ -762,10 +866,50 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 	return;
 }
 
+#ifdef H5_HAVE_PARALLEL
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_new_obj_mpio
+ *
+ * Purpose:     Create a new cdf vol object with MPI-IO
+ *
+ * Return:      Success:    Pointer to the new H5VL_cdf_t object
+ *              Failure:    NULL
+ *-------------------------------------------------------------------------
+ */
+static H5VL_cdf_t *
+H5VL_cdf_new_obj_mpio(MPI_File fh, hid_t acc_tpl)
+{
+	H5VL_cdf_t *new_obj;
+	new_obj = (H5VL_cdf_t *)calloc(1, sizeof(H5VL_cdf_t));
+	new_obj->fh = fh;
+	new_obj->fmt = 0;
+	new_obj->numrecs = 0;
+	new_obj->ndims = 0;
+	new_obj->natts = 0;
+	if (H5Pget_driver(acc_tpl) == H5FD_MPIO) {
+		H5Pget_fapl_mpio(acc_tpl, &new_obj->comm, &new_obj->info);
+#ifdef ENABLE_CDF_VERBOSE
+		printf("NOTE: H5Pget_driver(acc_tpl) == H5FD_MPIO.\n");
+#endif
+	} else {
+		new_obj->comm = MPI_COMM_WORLD;
+		new_obj->info = MPI_INFO_NULL;
+	}
+	MPI_Comm_rank(new_obj->comm, &new_obj->rank);
+	MPI_File_get_size( fh, &new_obj->size);
+	if (new_obj->size > 0) {
+		new_obj->cache = (char *)calloc(H5VL_CDF_CACHE_SIZE, sizeof(char));
+	}
+	new_obj->cache_offset = -1;
+	return new_obj;
+} /* end H5VL__cdf_new_obj() */
+
+#else /* H5_HAVE_PARALLEL */
+
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_new_obj
  *
- * Purpose:     Create a new cdf vol object
+ * Purpose:     Create a new cdf vol object (NO MPIO)
  *
  * Return:      Success:    Pointer to the new H5VL_cdf_t object
  *              Failure:    NULL
@@ -774,18 +918,17 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 static H5VL_cdf_t *
 H5VL_cdf_new_obj(int fd)
 {
-    H5VL_cdf_t *new_obj;
-
-    new_obj = (H5VL_cdf_t *)calloc(1, sizeof(H5VL_cdf_t));
-    new_obj->fd = fd;
-    new_obj->fmt = 0;
-    new_obj->numrecs = 0;
-    new_obj->ndims = 0;
-    new_obj->natts = 0;
-
-    return new_obj;
+	H5VL_cdf_t *new_obj;
+	new_obj = (H5VL_cdf_t *)calloc(1, sizeof(H5VL_cdf_t));
+	new_obj->fd = fd;
+	new_obj->fmt = 0;
+	new_obj->numrecs = 0;
+	new_obj->ndims = 0;
+	new_obj->natts = 0;
+	return new_obj;
 } /* end H5VL__cdf_new_obj() */
 
+#endif /* H5_HAVE_PARALLEL */
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_free_obj
@@ -838,12 +981,18 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 	if (obj->nvars > 0)
 		free(obj->vars);
 
+#ifdef H5_HAVE_PARALLEL
+	/* Free cache */
+	if (obj->size > 0) {
+		free(obj->cache);
+	}
+#endif
+
 	/* Free vol object */
 	free(obj);
 
 	return 0;
 } /* end H5VL_cdf_free_obj() */
-
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_read_header
@@ -969,20 +1118,35 @@ static void *
 H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
     hid_t dxpl_id, void **req)
 {
-
 		H5VL_cdf_info_t *info;
 		H5VL_cdf_t *file;
+		int err;
 
+#ifdef H5_HAVE_PARALLEL
+
+		MPI_File fh = 0;
+		MPI_Offset fsize;
+
+		/* Using MPIO VFD */
+		err = MPI_File_open(MPI_COMM_WORLD, (char *)name, MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
+		file = H5VL_cdf_new_obj_mpio( fh, fapl_id );
 #ifdef ENABLE_CDF_LOGGING
-		printf("------- CDF VOL FILE Open\n");
+		printf("------- CDF VOL FILE Open (MPIO) (size=%llu)\n",file->size);
 #endif
 
-		/* For now - Just using POSIX to prototype/test basic VOL */
-		file = H5VL_cdf_new_obj( open(name, O_RDONLY) );
+#else /* H5_HAVE_PARALLEL */
 
-		/* Try Reading the Header */
+		/* Not using MPIO - Use POSIX API instead */
+		file = H5VL_cdf_new_obj( open(name, O_RDONLY) );
+#ifdef ENABLE_CDF_LOGGING
+		printf("------- CDF VOL FILE Open (POSIX)\n");
+#endif
+
+#endif /* H5_HAVE_PARALLEL */
+
+		/* Try reading/parsing the header */
 		if ( cdf_read_header(file) ) {
-			cdf_handle_error( "Failed to read CDF header.", __LINE__ );
+			cdf_handle_error( "Failed to read CDF header on rank 0.", __LINE__ );
 		}
 
 		return (void *)file;
@@ -1008,8 +1172,14 @@ H5VL_cdf_file_close(void *file, hid_t dxpl_id, void **req)
     printf("------- CDF VOL FILE Close\n");
 #endif
 
-    /* For now - Just using POSIX to prototype/test basic VOL */
+#ifdef H5_HAVE_PARALLEL
+    /* MPI_File Close */
+		ret_value = (herr_t) MPI_File_close(&o->fh);
+#else
+    /* POSIX Close */
     ret_value = close(o->fd);
+#endif
+
     H5VL_cdf_free_obj( o );
 
     return ret_value;

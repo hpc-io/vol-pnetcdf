@@ -202,6 +202,7 @@ int main(int argc, char **argv) {
 	assert(H5VLis_connector_registered(connector_name) == 1);
 
 	acc_tpl = H5Pcreate (H5P_FILE_ACCESS);
+	H5Pset_fapl_mpio(acc_tpl, MPI_COMM_WORLD, MPI_INFO_NULL);
 	H5Pset_vol(acc_tpl, vol_id, &fapl);
 
 	file_id = H5Fopen(FILE, H5F_ACC_RDWR, acc_tpl);
