@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
 	hid_t vol_id;
 	char name[25];
 	ssize_t len;
-
+	int dset_data[1024];
 
 	MPI_Init(&argc, &argv);
 
@@ -206,6 +206,11 @@ int main(int argc, char **argv) {
 	H5Pset_vol(acc_tpl, vol_id, &fapl);
 
 	file_id = H5Fopen(FILE, H5F_ACC_RDWR, acc_tpl);
+
+	dataset_id = H5Dopen(file_id, "v1", H5P_DEFAULT);
+
+	status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data[0]);
+	printf("dset_data[0] = %d\n",dset_data[0]);
 
 	H5Fclose(file_id);
 	H5Pclose(acc_tpl);

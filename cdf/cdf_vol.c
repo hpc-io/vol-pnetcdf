@@ -79,6 +79,7 @@ typedef struct cdf_att_t {
 /* CDF variable object (structure) */
 typedef struct cdf_var_t {
 	cdf_name_t *name;
+	MPI_File fh; /* MPI File Handle */
 	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
 	cdf_non_neg_t vsize; /* vsize */
 	cdf_nc_type_t nc_type; /* var data type */
@@ -148,6 +149,8 @@ static herr_t H5VL_cdf_term(void);
 /* Attribute callbacks */
 
 /* Dataset callbacks */
+void *H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t dapl_id, hid_t dxpl_id, void **req);
+static herr_t H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id, hid_t file_space_id, hid_t plist_id, void *buf, void **req);
 
 /* Datatype callbacks */
 
@@ -197,8 +200,8 @@ const H5VL_class_t H5VL_cdf_g = {
     },
     {                                           /* dataset_cls */
         NULL, //H5VL_cdf_dataset_create,                    /* create */
-        NULL, //H5VL_cdf_dataset_open,                      /* open */
-        NULL, //H5VL_cdf_dataset_read,                      /* read */
+        H5VL_cdf_dataset_open,                      /* open */
+        H5VL_cdf_dataset_read,                      /* read */
         NULL, //H5VL_cdf_dataset_write,                     /* write */
         NULL, //H5VL_cdf_dataset_get,                       /* get */
         NULL, //H5VL_cdf_dataset_specific,                  /* specific */
@@ -1185,4 +1188,118 @@ H5VL_cdf_file_close(void *file, hid_t dxpl_id, void **req)
     return ret_value;
 } /* end H5VL_cdf_file_close() */
 
-
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_dataset_open
+ *
+ * Purpose:     Opens a dataset
+ *
+ * Return:      Success:    Pointer to the new dataset
+ *              Failure:    NULL
+ *
+ *-------------------------------------------------------------------------
+ */
+void *
+H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
+                      const char *name, hid_t dapl_id, hid_t dxpl_id, void **req)
+{
+	void *ret_value = NULL;             /* Return value */
+
+	/* For now, lets just assume an HDF5 dataset is the same as a CDF variable
+	 *
+	 */
+
+	/* Loop through variables, to find the desired object */
+	H5VL_cdf_t *file = (H5VL_cdf_t *)obj;
+	for (int ivar=0; ivar<file->nvars; ivar++ ){
+		cdf_var_t var = file->vars[ivar];
+		//printf("checking variable %s for name %s\n", var.name->string, name);
+		if ( strcmp( var.name->string, name) ) {
+			//printf(" -- MATCH\n");
+			var.fh = file->fh;
+			ret_value = (void *) &file->vars[ivar];
+			break;
+		}
+	}
+
+	/* Need to add more useful error handling here (if group name is not found etc) */
+
+	return ret_value;
+} /* end H5VL_cdf_dataset_open() */
+
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_dataset_read
+ *
+ * Purpose:	Reads data from dataset through the VOL
+*
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
+                      hid_t file_space_id, hid_t plist_id, void *buf, void **req)
+{
+	herr_t ret_value=0;
+	cdf_var_t *var = (cdf_var_t *)dset; /* Cast dset to cdf_var_t */
+	MPI_Status status;
+
+	size_t dataTypeSize = H5Tget_size(mem_type_id);
+
+	H5S_sel_type memSelType = H5S_SEL_ALL;
+	if (mem_space_id != 0) {
+		memSelType = H5Sget_select_type(mem_space_id);
+	}
+
+	H5S_sel_type h5selType = H5S_SEL_ALL;
+	if (file_space_id != 0)
+		h5selType = H5Sget_select_type(file_space_id);
+
+	if ((memSelType == H5S_SEL_NONE) || (h5selType == H5S_SEL_NONE)) {
+		// no thing was selected, do nothing
+		return 0;
+	}
+
+	uint8_t tmp[4];
+
+	if (h5selType == H5S_SEL_ALL) {
+
+
+		printf("Reading %llu values for offset %llu\n",var->vsize, var->offset);
+		MPI_File_read_at( var->fh, var->offset, (int *)buf, (var->vsize) , MPI_INT, &status );
+		tmp[0] = ((uint8_t *)buf)[3];
+		tmp[1] = ((uint8_t *)buf)[2];
+		tmp[2] = ((uint8_t *)buf)[1];
+		tmp[3] = ((uint8_t *)buf)[0];
+		printf("uint8_t %d %d %d %d\n", ((uint8_t *)buf)[0], ((uint8_t *)buf)[1], ((uint8_t *)buf)[2], ((uint8_t *)buf)[3] );
+		printf("uint8_t %d %d %d %d\n", ((uint8_t *)tmp)[0], ((uint8_t *)tmp)[1], ((uint8_t *)tmp)[2], ((uint8_t *)tmp)[3] );
+		printf("int buf %d \n", ((int *)buf)[0] );
+		printf("int tmp %d \n", ((int *)tmp)[0] );
+
+
+	} else {
+		printf("ERROR!!! Only H5S_SEL_ALL available for now.\n");
+	}
+
+
+
+// typedef struct cdf_var_t {
+// 	cdf_name_t *name;
+// 	MPI_File fh; /* MPI File Handle */
+// 	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
+// 	cdf_non_neg_t vsize; /* vsize */
+// 	cdf_nc_type_t nc_type; /* var data type */
+// 	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
+// 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
+//                           * shape. We say this is a "record variable" if and only
+//                           * if the first dimension is the record dimension.  */
+// 	cdf_non_neg_t natts; /* number of attributes for this var */
+// 	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
+// } cdf_var_t;
+
+
+
+	return ret_value;
+}
