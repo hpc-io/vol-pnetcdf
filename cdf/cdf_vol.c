@@ -79,10 +79,11 @@ typedef struct cdf_att_t {
 /* CDF variable object (structure) */
 typedef struct cdf_var_t {
 	cdf_name_t *name;
-	MPI_File fh; /* MPI File Handle */
+	void *file; /* "void" Pointer back to parent file object */
 	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
 	cdf_non_neg_t vsize; /* vsize */
 	cdf_nc_type_t nc_type; /* var data type */
+	int nc_type_size;
 	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
                           * shape. We say this is a "record variable" if and only
@@ -127,6 +128,7 @@ static H5VL_cdf_t *H5VL_cdf_new_obj_mpio(MPI_File fh, hid_t acc_tpl);
 static H5VL_cdf_t *H5VL_cdf_new_obj(int fd);
 #endif
 static herr_t H5VL_cdf_free_obj(H5VL_cdf_t *obj);
+static void bytestr_rev(char *p, int size);
 static uint32_t bytestr_to_uint32_t(char *bytestr);
 static uint64_t bytestr_to_uint64_t(char *bytestr);
 static uint32_t get_uint32_t(H5VL_cdf_t* file, off_t *rdoff);
@@ -135,6 +137,7 @@ static cdf_non_neg_t get_non_neg(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_offset_t get_offset(H5VL_cdf_t* file, off_t *rdoff);
 static uint8_t get_cdf_spec(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_name_t *get_cdf_name_t(H5VL_cdf_t* file, off_t *rdoff);
+static int get_nc_type_size(cdf_nc_type_t nc_type);
 static void *get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt);
 static cdf_dim_t *get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_att_t *get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts);
@@ -337,6 +340,26 @@ cdf_handle_error(char* errmsg, int lineno)
 {
 	fprintf(stderr, "CDF VOL Error at line %d of %s: %s\n", lineno, __FILE__, errmsg);
 	//MPI_Abort(MPI_COMM_WORLD, 1);
+}
+
+/*-------------------------------------------------------------------------
+ * Function:    bytestr_rev
+ *
+ * Purpose:     Reverse the order of a byte string in memory
+ *
+ * Return:      void
+ *-------------------------------------------------------------------------
+ */
+static void
+bytestr_rev(char *p, int size)
+{
+  char *q = p;
+  //while(q && *q) ++q;
+	q+=size;
+  for(--q; p < q; ++p, --q)
+    *p = *p ^ *q,
+    *q = *p ^ *q,
+    *p = *p ^ *q;
 }
 
 /*-------------------------------------------------------------------------
@@ -559,6 +582,92 @@ get_cdf_dims_t(H5VL_cdf_t* file, off_t *rdoff) {
 }
 
 /*-------------------------------------------------------------------------
+ * Function:    get_nc_type_size
+ *
+ * Purpose:     Given the nc_type - return the number of bytes
+ *
+ * Return:      int (number of bytes for each element)
+ *-------------------------------------------------------------------------
+ */
+static int
+get_nc_type_size(cdf_nc_type_t nc_type) {
+
+	int nc_type_size=0;
+
+	switch(nc_type) {
+		case 	NC_BYTE:	//=	\x00 \x00 \x00 \x01	//8-bit signed integers
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_BYTE\n");
+#endif
+			nc_type_size = 1;
+			break;
+		case 	NC_CHAR:		//=	\x00 \x00 \x00 \x02	//text characters
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_CHAR\n");
+#endif
+			nc_type_size = 1;
+			break;
+		case 	NC_SHORT:		//=	\x00 \x00 \x00 \x03	//16-bit signed integers
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_SHORT\n");
+#endif
+			nc_type_size = 2;
+			break;
+		case 	NC_INT:			//=	\x00 \x00 \x00 \x04	//32-bit signed integers
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_INT\n");
+#endif
+			nc_type_size = 4;
+			break;
+		case 	NC_FLOAT:		//=	\x00 \x00 \x00 \x05	//IEEE single precision floats
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_FLOAT\n");
+#endif
+			nc_type_size = 4;
+			break;
+		case 	NC_DOUBLE:	//=	\x00 \x00 \x00 \x06	//IEEE double precision floats
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_DOUBLE\n");
+#endif
+			nc_type_size = 8;
+			break;
+		case 	NC_UBYTE:		//=	\x00 \x00 \x00 \x07	//unsigned 1 byte integer
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_UBYTE\n");
+#endif
+			nc_type_size = 1;
+			break;
+		case 	NC_USHORT:	//=	\x00 \x00 \x00 \x08	//unsigned 2-byte integer
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_USHORT\n");
+#endif
+			nc_type_size = 2;
+			break;
+		case 	NC_UINT:		//=	\x00 \x00 \x00 \x09	//unsigned 4-byte integer
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_UINT\n");
+#endif
+			nc_type_size = 4;
+			break;
+		case 	NC_INT64:		//=	\x00 \x00 \x00 \x0A	//signed 8-byte integer
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_INT64\n");
+#endif
+			nc_type_size = 8;
+			break;
+		case 	NC_UINT64:	//=	\x00 \x00 \x00 \x0B	//unsigned 8-byte integer
+#ifdef ENABLE_CDF_VERBOSE
+			printf("NC_TYPE is NC_UINT64\n");
+#endif
+			nc_type_size = 8;
+			break;
+		default :
+			printf("ERROR!! %d not a recognized nc_type\n", nc_type);
+	}
+	return nc_type_size;
+}
+
+/*-------------------------------------------------------------------------
  * Function:    get_att_values
  *
  * Purpose:     Parse file header to generate "value" buffer.
@@ -571,77 +680,7 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 
 	void *values;
 
-	switch(atts[iatt].nc_type) {
-
-		case 	NC_BYTE:	//=	\x00 \x00 \x00 \x01	//8-bit signed integers
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_BYTE\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 1;
-			break;
-		case 	NC_CHAR:		//=	\x00 \x00 \x00 \x02	//text characters
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_CHAR\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 1;
-			break;
-		case 	NC_SHORT:		//=	\x00 \x00 \x00 \x03	//16-bit signed integers
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_SHORT\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 2;
-			break;
-		case 	NC_INT:			//=	\x00 \x00 \x00 \x04	//32-bit signed integers
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_INT\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 4;
-			break;
-		case 	NC_FLOAT:		//=	\x00 \x00 \x00 \x05	//IEEE single precision floats
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_FLOAT\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 4;
-			break;
-		case 	NC_DOUBLE:	//=	\x00 \x00 \x00 \x06	//IEEE double precision floats
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_DOUBLE\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 8;
-			break;
-		case 	NC_UBYTE:		//=	\x00 \x00 \x00 \x07	//unsigned 1 byte integer
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_UBYTE\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 1;
-			break;
-		case 	NC_USHORT:	//=	\x00 \x00 \x00 \x08	//unsigned 2-byte integer
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_USHORT\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 2;
-			break;
-		case 	NC_UINT:		//=	\x00 \x00 \x00 \x09	//unsigned 4-byte integer
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_UINT\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 4;
-			break;
-		case 	NC_INT64:		//=	\x00 \x00 \x00 \x0A	//signed 8-byte integer
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_INT64\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 8;
-			break;
-		case 	NC_UINT64:	//=	\x00 \x00 \x00 \x0B	//unsigned 8-byte integer
-#ifdef ENABLE_CDF_VERBOSE
-			printf("NC_TYPE for attribute %d is NC_UINT64\n",iatt);
-#endif
-			atts[iatt].nc_type_size = 8;
-			break;
-		default :
-			printf("ERROR!! %d not a recognized nc_type\n", atts[iatt].nc_type);
-	}
+	atts[iatt].nc_type_size = get_nc_type_size(atts[iatt].nc_type);
 	values = (void *) calloc(atts[iatt].nvals, atts[iatt].nc_type_size);
 
 	/* Populate padded byte count */
@@ -763,8 +802,9 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 
 		/* Get variable nc_type */
 		vars[ivar].nc_type = get_uint32_t(file,rdoff);
+		vars[ivar].nc_type_size = get_nc_type_size(vars[ivar].nc_type);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("vars[%d].nc_type = %d\n", ivar, vars[ivar].nc_type);
+		printf("vars[%d].nc_type = %d (size = %d)\n", ivar, vars[ivar].nc_type, vars[ivar].nc_type_size);
 #endif
 
 		/* Get vsize */
@@ -1205,19 +1245,16 @@ H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
 {
 	void *ret_value = NULL;             /* Return value */
 
-	/* For now, lets just assume an HDF5 dataset is the same as a CDF variable
-	 *
-	 */
-
+	/* Assume an HDF5 dataset is the same as a CDF variable */
 	/* Loop through variables, to find the desired object */
 	H5VL_cdf_t *file = (H5VL_cdf_t *)obj;
 	for (int ivar=0; ivar<file->nvars; ivar++ ){
-		cdf_var_t var = file->vars[ivar];
+		cdf_var_t *var = &(file->vars[ivar]);
 		//printf("checking variable %s for name %s\n", var.name->string, name);
-		if ( strcmp( var.name->string, name) ) {
+		if ( strcmp( var->name->string, name) ) {
 			//printf(" -- MATCH\n");
-			var.fh = file->fh;
-			ret_value = (void *) &file->vars[ivar];
+			var->file = (void *)file; /* Need to set the file pointer */
+			ret_value = (void *)var;
 			break;
 		}
 	}
@@ -1244,7 +1281,9 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 {
 	herr_t ret_value=0;
 	cdf_var_t *var = (cdf_var_t *)dset; /* Cast dset to cdf_var_t */
+	H5VL_cdf_t *file = (H5VL_cdf_t *)(var->file); /* Get pointer to file object */
 	MPI_Status status;
+	int i;
 
 	size_t dataTypeSize = H5Tget_size(mem_type_id);
 
@@ -1258,47 +1297,24 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		h5selType = H5Sget_select_type(file_space_id);
 
 	if ((memSelType == H5S_SEL_NONE) || (h5selType == H5S_SEL_NONE)) {
-		// no thing was selected, do nothing
+		/* Nothing was selected, do nothing */
 		return 0;
 	}
 
-	uint8_t tmp[4];
-
 	if (h5selType == H5S_SEL_ALL) {
-
-
+#ifdef ENABLE_CDF_VERBOSE
 		printf("Reading %llu values for offset %llu\n",var->vsize, var->offset);
-		MPI_File_read_at( var->fh, var->offset, (int *)buf, (var->vsize) , MPI_INT, &status );
-		tmp[0] = ((uint8_t *)buf)[3];
-		tmp[1] = ((uint8_t *)buf)[2];
-		tmp[2] = ((uint8_t *)buf)[1];
-		tmp[3] = ((uint8_t *)buf)[0];
-		printf("uint8_t %d %d %d %d\n", ((uint8_t *)buf)[0], ((uint8_t *)buf)[1], ((uint8_t *)buf)[2], ((uint8_t *)buf)[3] );
-		printf("uint8_t %d %d %d %d\n", ((uint8_t *)tmp)[0], ((uint8_t *)tmp)[1], ((uint8_t *)tmp)[2], ((uint8_t *)tmp)[3] );
-		printf("int buf %d \n", ((int *)buf)[0] );
-		printf("int tmp %d \n", ((int *)tmp)[0] );
+#endif
+		MPI_File_read_at( file->fh, var->offset, (char *)buf, (var->vsize) , MPI_BYTE, &status );
 
+		/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
+		for (i=0; i<(var->vsize); i+=var->nc_type_size){
+			bytestr_rev(&buf[i],var->nc_type_size);
+		}
 
 	} else {
 		printf("ERROR!!! Only H5S_SEL_ALL available for now.\n");
 	}
-
-
-
-// typedef struct cdf_var_t {
-// 	cdf_name_t *name;
-// 	MPI_File fh; /* MPI File Handle */
-// 	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
-// 	cdf_non_neg_t vsize; /* vsize */
-// 	cdf_nc_type_t nc_type; /* var data type */
-// 	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
-// 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
-//                           * shape. We say this is a "record variable" if and only
-//                           * if the first dimension is the record dimension.  */
-// 	cdf_non_neg_t natts; /* number of attributes for this var */
-// 	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
-// } cdf_var_t;
-
 
 
 	return ret_value;

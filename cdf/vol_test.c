@@ -50,7 +50,7 @@ int write_cdf( ) {
     ret = ncmpi_enddef(ncfile);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
-    start=rank, count=1, data=rank;
+    start=rank, count=1, data=(rank+10);
 
     /* in this simple example every process writes its rank to two 1d variables */
     ret = ncmpi_put_vara_int_all(ncfile, varid1, &start, &count, &data);
@@ -179,8 +179,12 @@ int main(int argc, char **argv) {
 	char name[25];
 	ssize_t len;
 	int dset_data[1024];
+	int nprocs, rank;
 
 	MPI_Init(&argc, &argv);
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
 	if(argc !=2){
 		printf("Input: connector name, e.g., cdf\n");
@@ -210,7 +214,7 @@ int main(int argc, char **argv) {
 	dataset_id = H5Dopen(file_id, "v1", H5P_DEFAULT);
 
 	status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data[0]);
-	printf("dset_data[0] = %d\n",dset_data[0]);
+	printf("dset_data[%d] = %d\n", rank, dset_data[rank]);
 
 	H5Fclose(file_id);
 	H5Pclose(acc_tpl);
