@@ -16,10 +16,11 @@ static void handle_error(int status, int lineno)
 
 
 int write_cdf( ) {
-    int ret, ncfile, nprocs, rank, dimid, varid1, varid2, ndims=1;
+    int ret, ncfile, nprocs, rank, dimid1, varid1, varid2, ndims=1;
     char filename[256], buf[13] = "Hello World\n";
 		MPI_Offset start, count=1;
     int data;
+		double data_dbl;
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -29,13 +30,13 @@ int write_cdf( ) {
     ret = ncmpi_create(MPI_COMM_WORLD, filename, NC_CLOBBER|NC_64BIT_OFFSET, MPI_INFO_NULL, &ncfile);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
-    ret = ncmpi_def_dim(ncfile, "d1", nprocs, &dimid);
+    ret = ncmpi_def_dim(ncfile, "d1", nprocs, &dimid1);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
-    ret = ncmpi_def_var(ncfile, "v1", NC_INT, ndims, &dimid, &varid1);
+    ret = ncmpi_def_var(ncfile, "v1", NC_INT, ndims, &dimid1, &varid1);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
-    ret = ncmpi_def_var(ncfile, "v2", NC_INT, ndims, &dimid, &varid2);
+    ret = ncmpi_def_var(ncfile, "v2", NC_DOUBLE, ndims, &dimid1, &varid2);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
     ret = ncmpi_put_att_text(ncfile, NC_GLOBAL, "string", 13, buf);
@@ -51,12 +52,13 @@ int write_cdf( ) {
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
     start=rank, count=1, data=(rank+10);
+		data_dbl=((double)rank + 10.0);
 
     /* in this simple example every process writes its rank to two 1d variables */
     ret = ncmpi_put_vara_int_all(ncfile, varid1, &start, &count, &data);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
-    ret = ncmpi_put_vara_int_all(ncfile, varid2, &start, &count, &data);
+    ret = ncmpi_put_vara_double_all(ncfile, varid2, &start, &count, &data_dbl);
     if (ret != NC_NOERR) handle_error(ret, __LINE__);
 
     ret = ncmpi_close(ncfile);
@@ -169,7 +171,7 @@ int read_cdf( ) {
 
 int main(int argc, char **argv) {
 
-	hid_t file_id, dataset_id, dataspace_id;  /* identifiers */
+	hid_t file_id, dataset_id_1, dataset_id_2, dataspace_id;  /* identifiers */
 	hsize_t dims[2];
 	herr_t status;
 	char connector_name[25];
@@ -178,7 +180,8 @@ int main(int argc, char **argv) {
 	hid_t vol_id;
 	char name[25];
 	ssize_t len;
-	int dset_data[1024];
+	int dset_data_1[1024];
+	double dset_data_2[1024];
 	int nprocs, rank;
 
 	MPI_Init(&argc, &argv);
@@ -211,10 +214,17 @@ int main(int argc, char **argv) {
 
 	file_id = H5Fopen(FILE, H5F_ACC_RDWR, acc_tpl);
 
-	dataset_id = H5Dopen(file_id, "v1", H5P_DEFAULT);
+	dataset_id_1 = H5Dopen(file_id, "v1", H5P_DEFAULT);
+	status = H5Dread(dataset_id_1, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data_1[0]);
+	printf("dset_data_1[%d] = %d\n", rank, dset_data_1[rank]);
+	H5Dclose(dataset_id_1);
 
-	status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data[0]);
-	printf("dset_data[%d] = %d\n", rank, dset_data[rank]);
+	MPI_Barrier( MPI_COMM_WORLD );
+
+	dataset_id_2 = H5Dopen(file_id, "v2", H5P_DEFAULT);
+	status = H5Dread(dataset_id_2, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data_2[0]);
+	printf("dset_data_2[%d] = %f\n", rank, dset_data_2[rank]);
+	H5Dclose(dataset_id_2);
 
 	H5Fclose(file_id);
 	H5Pclose(acc_tpl);

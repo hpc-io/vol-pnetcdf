@@ -154,6 +154,7 @@ static herr_t H5VL_cdf_term(void);
 /* Dataset callbacks */
 void *H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t dapl_id, hid_t dxpl_id, void **req);
 static herr_t H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id, hid_t file_space_id, hid_t plist_id, void *buf, void **req);
+static herr_t H5VL_cdf_dataset_close(void *dset, hid_t dxpl_id, void **req);
 
 /* Datatype callbacks */
 
@@ -209,7 +210,7 @@ const H5VL_class_t H5VL_cdf_g = {
         NULL, //H5VL_cdf_dataset_get,                       /* get */
         NULL, //H5VL_cdf_dataset_specific,                  /* specific */
         NULL, //H5VL_cdf_dataset_optional,                  /* optional */
-        NULL, //H5VL_cdf_dataset_close                      /* close */
+        H5VL_cdf_dataset_close                      /* close */
     },
     {                                               /* datatype_cls */
         NULL, //H5VL_cdf_datatype_commit,                   /* commit */
@@ -688,29 +689,29 @@ get_att_values(H5VL_cdf_t* file, off_t *rdoff, cdf_att_t *atts, int iatt) {
 
 	cdf_non_neg_t npadded = (cdf_non_neg_t)( (valsize/4)*4 + ((valsize%4>0)?4:0) );
 #ifdef ENABLE_CDF_VERBOSE
-	printf("padded byte count = %llu\n", npadded);
+	printf("[%d] padded byte count = %llu\n", file->rank, npadded);
 #endif
 
 	/* Populate values from bytes in file */
 #ifdef H5_HAVE_PARALLEL
-		cdf_cache_read(file, rdoff, values, valsize);
+	cdf_cache_read(file, rdoff, values, valsize);
 #else
-		pread(file->fd, values, valsize, *rdoff);
+	pread(file->fd, values, valsize, *rdoff);
 #endif
 	*rdoff = *rdoff + npadded;
 
 
-#ifdef ENABLE_CDF_VERBOSE
+//#ifdef ENABLE_CDF_VERBOSE
 	/* Check Values */
-	char *tmp = (char *) calloc(valsize, sizeof(char));
-	memcpy(tmp, values, valsize);
-	printf("att values = ");
-	for (int c=0; c<valsize; c++){
-		printf("%c", tmp[c]);
-	}
-	printf("\n");
-	free(tmp);
-#endif
+	//char *tmp = (char *) calloc(valsize, sizeof(char));
+	//memcpy(tmp, values, valsize);
+	//printf("att values = ");
+	//for (int c=0; c<valsize; c++){
+	//	printf("%c", tmp[c]);
+	//}
+	//printf("\n");
+	//free(tmp);
+//#endif
 
 	return values;
 }
@@ -738,13 +739,13 @@ get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts) {
 		/* Get attribute type */
 		atts[iatt].nc_type = get_uint32_t(file,rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("atts[%d].nc_type = %d\n", iatt, atts[iatt].nc_type);
+		printf("[%d] atts[%d].nc_type = %d\n", file->rank, iatt, atts[iatt].nc_type);
 #endif
 
 		/* Get number of attribute values */
 		atts[iatt].nvals = get_non_neg(file, rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("atts[%d].nvals = %llu\n", iatt, atts[iatt].nvals);
+		printf("[%d] atts[%d].nvals = %llu\n", file->rank, iatt, atts[iatt].nvals);
 #endif
 
 		/* Read the attribute values */
@@ -782,7 +783,7 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 		/* Get rank of this var (dimensionality) */
 		vars[ivar].dimrank = get_non_neg(file, rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("vars[%d].dimrank = %llu\n", ivar, vars[ivar].dimrank);
+		printf("[%d] vars[%d].dimrank = %llu\n", file->rank, ivar, vars[ivar].dimrank);
 #endif
 		if (vars[ivar].dimrank > 0) {
 			vars[ivar].dimids = (cdf_non_neg_t *) calloc(vars[ivar].dimrank, sizeof(cdf_non_neg_t));
@@ -791,7 +792,7 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 			for (int id=0; id<vars[ivar].dimrank; id++) {
 				vars[ivar].dimids[id] = get_non_neg(file, rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-				printf("vars[%d].dimids[%d] = %llu\n", ivar, id, vars[ivar].dimids[id]);
+				printf("[%d] vars[%d].dimids[%d] = %llu\n", file->rank, ivar, id, vars[ivar].dimids[id]);
 #endif
 			}
 
@@ -804,19 +805,19 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 		vars[ivar].nc_type = get_uint32_t(file,rdoff);
 		vars[ivar].nc_type_size = get_nc_type_size(vars[ivar].nc_type);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("vars[%d].nc_type = %d (size = %d)\n", ivar, vars[ivar].nc_type, vars[ivar].nc_type_size);
+		printf("[%d] vars[%d].nc_type = %d (size = %d)\n", file->rank, ivar, vars[ivar].nc_type, vars[ivar].nc_type_size);
 #endif
 
 		/* Get vsize */
 		vars[ivar].vsize = get_non_neg(file, rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("vars[%d].vsize = %llu\n", ivar, vars[ivar].vsize);
+		printf("[%d] vars[%d].vsize = %llu\n", file->rank, ivar, vars[ivar].vsize);
 #endif
 
 		/* Get file offset (begin) */
 		vars[ivar].offset = get_offset(file, rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-		printf("vars[%d].offset = %llu\n", ivar, vars[ivar].offset);
+		printf("[%d] vars[%d].offset = %llu\n", file->rank, ivar, vars[ivar].offset);
 #endif
 
 	}
@@ -857,7 +858,7 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 			/* Get nelems of var_list (file->nvars) */
 			file->nvars = (uint64_t) get_non_neg(file, rdoff);
 #ifdef ENABLE_CDF_VERBOSE
-			printf("file->nvars = %llu\n", file->nvars);
+			printf("[%d] file->nvars = %llu\n", file->rank, file->nvars);
 #endif
 
 			/* Populate list of var objects */
@@ -897,12 +898,12 @@ get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var) {
 		if (file->fmt < 5) {
 			*rdoff = *rdoff + 4;
 #ifdef ENABLE_CDF_VERBOSE
-			printf("ABSENT. Moving forward 4 bytes.\n");
+			printf("[%d] ABSENT. Moving forward 4 bytes.\n", file->rank);
 #endif
 		} else {
 			*rdoff = *rdoff + 8;
 #ifdef ENABLE_CDF_VERBOSE
-			printf("ABSENT. Moving forward 8 bytes.\n");
+			printf("[%d] ABSENT. Moving forward 8 bytes.\n", file->rank);
 #endif
 		}
 	}
@@ -1250,9 +1251,10 @@ H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
 	H5VL_cdf_t *file = (H5VL_cdf_t *)obj;
 	for (int ivar=0; ivar<file->nvars; ivar++ ){
 		cdf_var_t *var = &(file->vars[ivar]);
-		//printf("checking variable %s for name %s\n", var.name->string, name);
-		if ( strcmp( var->name->string, name) ) {
-			//printf(" -- MATCH\n");
+		if ( !strcmp( var->name->string, name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+			printf("[%d] <%s> <%s> MATCH!\n",file->rank, var->name->string, name);
+#endif
 			var->file = (void *)file; /* Need to set the file pointer */
 			ret_value = (void *)var;
 			break;
@@ -1264,6 +1266,23 @@ H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
 	return ret_value;
 } /* end H5VL_cdf_dataset_open() */
 
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_dataset_close
+ *
+ * Purpose      Close dataset (not really used in this VOL)
+*
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+H5VL_cdf_dataset_close(void *dset, hid_t dxpl_id, void **req) {
+	herr_t ret_value=0;
+	dset = NULL;
+	/* Don't need to free anything (taken care of when file is closed) */
+	return ret_value;
+}
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_dataset_read
@@ -1303,7 +1322,8 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 
 	if (h5selType == H5S_SEL_ALL) {
 #ifdef ENABLE_CDF_VERBOSE
-		printf("Reading %llu values for offset %llu\n",var->vsize, var->offset);
+		printf("[%d] <%s> Reading %llu values for offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
+		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
 		MPI_File_read_at( file->fh, var->offset, (char *)buf, (var->vsize) , MPI_BYTE, &status );
 
