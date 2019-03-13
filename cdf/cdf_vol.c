@@ -13,8 +13,16 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "hdf5.h"
+#include "H5Epublic.h"
 #include "cdf_vol.h"
 
+/* Include HDF5 src files (Ideally these should NOT be needed) */
+//#include "H5Dprivate.h" // H5D_t
+//#include "H5Iprivate.h" // H5I_object_verify
+#define H5S_FRIEND  // suppress error for H5Spkg
+#include "H5Spkg.h" // H5S_hyper_dim
+//#define H5O_FRIEND  // suppress error for H5Opkg
+//#include "H5Opkg.h"
 
 /**********/
 /* Macros */
@@ -23,7 +31,7 @@
 /* Whether to display log messages when callback is invoked */
 /* (Uncomment to enable) */
 #define ENABLE_CDF_LOGGING
-//#define ENABLE_CDF_VERBOSE
+#define ENABLE_CDF_VERBOSE
 
 /* Hack for missing va_copy() in old Visual Studio editions
  * (from H5win2_defs.h - used on VS2012 and earlier)
@@ -88,6 +96,7 @@ typedef struct cdf_var_t {
 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
                           * shape. We say this is a "record variable" if and only
                           * if the first dimension is the record dimension.  */
+	hsize_t *dimlens; /* Size of each dimension */
 	cdf_non_neg_t natts; /* number of attributes for this var */
 	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
 } cdf_var_t;
@@ -788,12 +797,15 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 #endif
 		if (vars[ivar].dimrank > 0) {
 			vars[ivar].dimids = (cdf_non_neg_t *) calloc(vars[ivar].dimrank, sizeof(cdf_non_neg_t));
+			vars[ivar].dimlens = (hsize_t *) calloc(vars[ivar].dimrank, sizeof(hsize_t));
 
 			/* Get dimid list */
 			for (int id=0; id<vars[ivar].dimrank; id++) {
 				vars[ivar].dimids[id] = get_non_neg(file, rdoff);
+				vars[ivar].dimlens[id] = file->dims[ vars[ivar].dimids[id] ].length;
 #ifdef ENABLE_CDF_VERBOSE
 				printf("[%d] vars[%d].dimids[%d] = %llu\n", file->rank, ivar, id, vars[ivar].dimids[id]);
+				printf("[%d] vars[%d].dimlens[%d] = %llu\n", file->rank, ivar, id, vars[ivar].dimlens[id]);
 #endif
 			}
 
@@ -1002,8 +1014,10 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 
 	/* Free values for each variable */
 	for (int d=0; d<obj->nvars; d++){
-		if (obj->vars[d].dimrank > 0)
+		if (obj->vars[d].dimrank > 0){
 			free(obj->vars[d].dimids);
+			free(obj->vars[d].dimlens);
+		}
 		free(obj->vars[d].name->string);
 		free(obj->vars[d].name);
 		for (int a=0; a<obj->vars[d].natts; a++){
@@ -1312,6 +1326,9 @@ H5VL_cdf_dataset_get(void *obj, H5VL_dataset_get_t get_type, hid_t dxpl_id,
 			//// not sure how the local variables will behave here
 			//// right now retrieve the datablock specified todimInfo in createVar()
 			//*ret_id = H5Screate_simple(var->dimInfo->ndim, var->dimInfo->dims, NULL);
+
+			//H5VL_cdf_t *file = (H5VL_cdf_t *) (var->file);
+			*ret_id = H5Screate_simple(var->dimrank, var->dimlens, NULL);
 		}
 		break;
 	}
@@ -1377,7 +1394,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	cdf_var_t *var = (cdf_var_t *)dset; /* Cast dset to cdf_var_t */
 	H5VL_cdf_t *file = (H5VL_cdf_t *)(var->file); /* Get pointer to file object */
 	MPI_Status status;
-	int i;
+	int i, n;
 
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> In H5VL_cdf_dataset_read\n",file->rank, var->name->string);
@@ -1410,6 +1427,79 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
 		for (i=0; i<(var->vsize); i+=var->nc_type_size){
 			bytestr_rev(&buf[i],var->nc_type_size);
+		}
+
+	} else if (h5selType == H5S_SEL_HYPERSLABS) {
+		printf("WARNING!!! H5S_SEL_HYPERSLABS is still experimental.\n");
+
+		hsize_t npoints = H5Sget_select_npoints(file_space_id);
+		printf("[%d] <%s> Hyperslab selection has %llu points.\n", file->rank, var->name->string, npoints);
+
+		if ((var->vsize) == npoints) {
+
+			/* The hyperslab is actually the entire variable, read everything */
+#ifdef ENABLE_CDF_VERBOSE
+			printf("[%d] <%s> Reading %llu values for offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
+			printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
+#endif
+			MPI_File_read_at( file->fh, var->offset, (char *)buf, (var->vsize) , MPI_BYTE, &status );
+			/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
+			for (i=0; i<(var->vsize); i+=var->nc_type_size){
+				bytestr_rev(&buf[i],var->nc_type_size);
+			}
+
+		} else {
+
+			/* Hyperslab is a proper subset of elements - create block list */
+			hsize_t nblocks = H5Sget_select_hyper_nblocks(file_space_id);
+			printf("[%d] <%s> nblocks = %llu\n", file->rank, var->name->string, nblocks);
+
+			H5S_t *space = (H5S_t *) H5I_object_verify(file_space_id, H5I_DATASPACE);
+			int ndims = (var->dimrank);
+
+			hsize_t *blockinfo = (hsize_t *) malloc( sizeof(hsize_t) * 2 * ndims * nblocks );
+			herr_t status = H5Sget_select_hyper_blocklist(file_space_id, (hsize_t)0, nblocks, blockinfo);
+
+			void *output_data = (void *) malloc ((var->nc_type_size) * npoints);
+			void *dup = output_data;
+
+			//for (n = 0; n < nblocks; n++) {
+			//	if (file->rank==1) printf("[%d] <%s> blockinfo[%d] = %llu\n",file->rank,var->name->string,n,blockinfo[i]);
+			//}
+
+			for (n = 0; n < nblocks; n++) {
+				uint64_t blockSize = 1;
+				uint64_t h_start[ndims], h_count[ndims];
+				MPI_Datatype h_types[ndims];
+				for (i = 0; i < ndims; i++) {
+					int pos = 2 * ndims * n;
+					h_types[i] = MPI_BYTE;
+					h_start[i] = (blockinfo[pos + i]);
+					h_count[i] = (blockinfo[pos + ndims + i] - h_start[i] + 1);
+					blockSize *= h_count[i];
+					printf("[%d] <%s> h_start[%d] = %llu\n", file->rank, var->name->string, i, h_start[i]);
+					printf("[%d] <%s> h_count[%d] = %llu\n", file->rank, var->name->string, i, h_count[i]);
+				}
+				printf("[%d] <%s> blockSize = %llu\n", file->rank, var->name->string, blockSize);
+
+				// MPI_Datatype structype;
+				// MPI_Type_create_struct( ndims, h_count, h_start, h_types, &structype );
+				// MPI_Type_commit( &structype );
+				// MPI_File_set_view( file->fh, 0, MPI_BYTE, structype, "native", MPI_INFO_NULL );
+				// MPI_File_read( file->fh, (char *)buf, blockSize, MPI_BYTE, &status );
+				// /* Swap bytes for each value (need to add rigorous test for "when" to do this) */
+				// for (i=0; i<blockSize; i+=var->nc_type_size){
+				// 	bytestr_rev(&buf[i],var->nc_type_size);
+				// }
+
+			}
+
+
+
+			free(output_data);
+			free(blockinfo);
+
+
 		}
 
 	} else {
