@@ -154,6 +154,7 @@ static herr_t H5VL_cdf_term(void);
 /* Dataset callbacks */
 void *H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t dapl_id, hid_t dxpl_id, void **req);
 static herr_t H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id, hid_t file_space_id, hid_t plist_id, void *buf, void **req);
+static herr_t H5VL_cdf_dataset_get(void *obj, H5VL_dataset_get_t get_type, hid_t dxpl_id, void **req, va_list arguments);
 static herr_t H5VL_cdf_dataset_close(void *dset, hid_t dxpl_id, void **req);
 
 /* Datatype callbacks */
@@ -207,7 +208,7 @@ const H5VL_class_t H5VL_cdf_g = {
         H5VL_cdf_dataset_open,                      /* open */
         H5VL_cdf_dataset_read,                      /* read */
         NULL, //H5VL_cdf_dataset_write,                     /* write */
-        NULL, //H5VL_cdf_dataset_get,                       /* get */
+        H5VL_cdf_dataset_get,                       /* get */
         NULL, //H5VL_cdf_dataset_specific,                  /* specific */
         NULL, //H5VL_cdf_dataset_optional,                  /* optional */
         H5VL_cdf_dataset_close                      /* close */
@@ -1253,7 +1254,7 @@ H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
 		cdf_var_t *var = &(file->vars[ivar]);
 		if ( !strcmp( var->name->string, name) ) {
 #ifdef ENABLE_CDF_VERBOSE
-			printf("[%d] <%s> <%s> MATCH!\n",file->rank, var->name->string, name);
+			printf("[%d] <%s> <%s> MATCH! vsize = %llu, nc_type_size = %d, offset = %llu\n",file->rank, var->name->string, name, var->vsize, var->nc_type_size, var->offset);
 #endif
 			var->file = (void *)file; /* Need to set the file pointer */
 			ret_value = (void *)var;
@@ -1265,6 +1266,79 @@ H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
 
 	return ret_value;
 } /* end H5VL_cdf_dataset_open() */
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_dataset_get
+ *
+ * Purpose      Get specific information about the dataset
+*
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+H5VL_cdf_dataset_get(void *obj, H5VL_dataset_get_t get_type, hid_t dxpl_id,
+                     void **req, va_list arguments) {
+  cdf_var_t *var = (cdf_var_t *)obj;
+  herr_t ret_value = 0; /* Return value */
+
+	// /* CDF variable object (structure) */
+	// typedef struct cdf_var_t {
+	// 	cdf_name_t *name;
+	// 	void *file; /* "void" Pointer back to parent file object */
+	// 	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
+	// 	cdf_non_neg_t vsize; /* vsize */
+	// 	cdf_nc_type_t nc_type; /* var data type */
+	// 	int nc_type_size;
+	// 	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
+	// 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
+	//                           * shape. We say this is a "record variable" if and only
+	//                           * if the first dimension is the record dimension.  */
+	// 	cdf_non_neg_t natts; /* number of attributes for this var */
+	// 	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
+	// } cdf_var_t;
+
+	switch (get_type) {
+
+	/* H5Dget_space */
+	case H5VL_DATASET_GET_SPACE: {
+		hid_t *ret_id = va_arg(arguments, hid_t *);
+		if (var->dimrank == 0) {
+			*ret_id = H5Screate(H5S_SCALAR);
+		} else {
+			//// ADIOS VOL Code:
+			//// if (var->is_global_dim >= 0)
+			//// not sure how the local variables will behave here
+			//// right now retrieve the datablock specified todimInfo in createVar()
+			//*ret_id = H5Screate_simple(var->dimInfo->ndim, var->dimInfo->dims, NULL);
+		}
+		break;
+	}
+	case H5VL_DATASET_GET_TYPE: {
+		//// ADIOS VOL Code:
+		//struct adios_index_comp_struct_v1 *varInAdios = adios_get_var_byname(var->fileReader, var->name);
+		//*ret_id = toHDF5type(varInAdios);
+		break;
+	}
+	case H5VL_DATASET_GET_DCPL: {
+		//// ADIOS VOL Code:
+		//*ret_id = H5Pcreate(H5P_DATASET_CREATE);
+		break;
+	}
+	case H5VL_DATASET_GET_STORAGE_SIZE: {
+		hsize_t *ret = va_arg(arguments, hsize_t *);
+		*ret = (hsize_t)(var->vsize);
+		//printf("H5VL_cdf_dataset_get -- var->vsize = %llu (*ret=%llu)\n",var->vsize,*ret);
+		break;
+	}
+	default:
+		printf("ERROR -- H5VL_DATASET_GET option not supported yet.\n");
+		return -1;
+	}
+
+	return ret_value;
+}
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_dataset_close
@@ -1298,11 +1372,16 @@ static herr_t
 H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
                       hid_t file_space_id, hid_t plist_id, void *buf, void **req)
 {
+
 	herr_t ret_value=0;
 	cdf_var_t *var = (cdf_var_t *)dset; /* Cast dset to cdf_var_t */
 	H5VL_cdf_t *file = (H5VL_cdf_t *)(var->file); /* Get pointer to file object */
 	MPI_Status status;
 	int i;
+
+#ifdef ENABLE_CDF_VERBOSE
+		printf("[%d] <%s> In H5VL_cdf_dataset_read\n",file->rank, var->name->string);
+#endif
 
 	size_t dataTypeSize = H5Tget_size(mem_type_id);
 
@@ -1321,6 +1400,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	}
 
 	if (h5selType == H5S_SEL_ALL) {
+
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> Reading %llu values for offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
 		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);

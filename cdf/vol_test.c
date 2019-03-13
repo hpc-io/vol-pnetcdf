@@ -7,6 +7,17 @@
 #define FILE "testfile.nc"
 #include <pnetcdf.h>
 
+/*
+ *    PNETCDF code for writing the file is taken from the github repository:
+ *    https://github.com/Parallel-NetCDF/PnetCDF/blob/master/examples/C/collective_write.c
+ */
+
+/* Set SIMPLE_TEST=0 for multi-dimensional tests */
+#define SIMPLE_TEST 0
+#define NDIMS       3
+#define NUM_VARS   10
+#define ERR {if(err!=NC_NOERR){printf("Error at %s:%d : %s\n", __FILE__,__LINE__, ncmpi_strerror(err));nerrs++;}}
+static int verbose=1;
 
 static void handle_error(int status, int lineno)
 {
@@ -14,6 +25,131 @@ static void handle_error(int status, int lineno)
     MPI_Abort(MPI_COMM_WORLD, 1);
 }
 
+static
+void print_info(MPI_Info *info_used)
+{
+    int     flag;
+    char    info_cb_nodes[64], info_cb_buffer_size[64];
+    char    info_striping_factor[64], info_striping_unit[64];
+
+    strcpy(info_cb_nodes,        "undefined");
+    strcpy(info_cb_buffer_size,  "undefined");
+    strcpy(info_striping_factor, "undefined");
+    strcpy(info_striping_unit,   "undefined");
+
+    MPI_Info_get(*info_used, "cb_nodes", 64, info_cb_nodes, &flag);
+    MPI_Info_get(*info_used, "cb_buffer_size", 64, info_cb_buffer_size, &flag);
+    MPI_Info_get(*info_used, "striping_factor", 64, info_striping_factor, &flag);
+    MPI_Info_get(*info_used, "striping_unit", 64, info_striping_unit, &flag);
+
+    printf("MPI hint: cb_nodes        = %s\n", info_cb_nodes);
+    printf("MPI hint: cb_buffer_size  = %s\n", info_cb_buffer_size);
+    printf("MPI hint: striping_factor = %s\n", info_striping_factor);
+    printf("MPI hint: striping_unit   = %s\n", info_striping_unit);
+}
+
+int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len) {
+
+	char str[512];
+	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
+	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS], varids[NUM_VARS];
+	double write_timing, max_write_timing, write_bw;
+	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
+	MPI_Offset write_size, sum_write_size;
+	MPI_Info info_used;
+
+	MPI_Comm_rank(comm, &rank);
+	MPI_Comm_size(comm, &nprocs);
+
+	for (i=0; i<NDIMS; i++)
+	    psizes[i] = 0;
+
+	MPI_Dims_create(nprocs, NDIMS, psizes);
+	starts[0] = rank % psizes[0];
+	starts[1] = (rank / psizes[1]) % psizes[1];
+	starts[2] = (rank / (psizes[0] * psizes[1])) % psizes[2];
+
+	bufsize = 1;
+	for (i=0; i<NDIMS; i++) {
+	    gsizes[i] = (MPI_Offset)len * psizes[i];
+	    starts[i] *= len;
+	    counts[i]  = len;
+	    bufsize   *= len;
+	}
+
+	/* allocate buffer and initialize with non-zero numbers */
+	for (i=0; i<NUM_VARS; i++) {
+	    buf[i] = (int *) malloc(bufsize * sizeof(int));
+	    for (j=0; j<bufsize; j++) buf[i][j] = rank * i + 123 + j;
+	}
+
+	MPI_Barrier(comm);
+	write_timing = MPI_Wtime();
+
+	/* create the file */
+	cmode |= NC_CLOBBER;
+	err = ncmpi_create(comm, filename, cmode, MPI_INFO_NULL, &ncid);
+	if (err != NC_NOERR) {
+	    printf("Error at %s:%d ncmpi_create() file %s (%s)\n",
+	           __FILE__,__LINE__,filename,ncmpi_strerror(err));
+	    MPI_Abort(comm, -1);
+	    exit(1);
+	}
+
+	/* define dimensions */
+	for (i=0; i<NDIMS; i++) {
+	    sprintf(str, "%c", 'x'+i);
+	    err = ncmpi_def_dim(ncid, str, gsizes[i], &dimids[i]); ERR
+	}
+
+	/* define variables */
+	for (i=0; i<NUM_VARS; i++) {
+	    sprintf(str, "var%d", i);
+	    err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids, &varids[i]); ERR
+	}
+
+	/* exit the define mode */
+	err = ncmpi_enddef(ncid); ERR
+
+	/* get all the hints used */
+	err = ncmpi_inq_file_info(ncid, &info_used); ERR
+
+	/* write one variable at a time */
+	for (i=0; i<NUM_VARS; i++) {
+	    err = ncmpi_put_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
+	    ERR
+	}
+
+	/* close the file */
+	err = ncmpi_close(ncid); ERR
+
+	write_timing = MPI_Wtime() - write_timing;
+
+	write_size = bufsize * NUM_VARS * sizeof(int);
+	for (i=0; i<NUM_VARS; i++) free(buf[i]);
+
+	MPI_Reduce(&write_size, &sum_write_size, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+	MPI_Reduce(&write_timing, &max_write_timing, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+
+	if (rank == 0 && verbose) {
+	    float subarray_size = (float)bufsize*sizeof(int)/1048576.0;
+	    print_info(&info_used);
+	    printf("Local array size %d x %d x %d integers, size = %.2f MB\n",len,len,len,subarray_size);
+	    sum_write_size /= 1048576.0;
+	    printf("Global array size %lld x %lld x %lld integers, write size = %.2f GB\n",
+	           gsizes[0], gsizes[1], gsizes[2], sum_write_size/1024.0);
+
+	    write_bw = sum_write_size/max_write_timing;
+	    printf(" procs    Global array size  exec(sec)  write(MB/s)\n");
+	    printf("-------  ------------------  ---------  -----------\n");
+	    printf(" %4d    %4lld x %4lld x %4lld %8.2f  %10.2f\n\n", nprocs,
+	           gsizes[0], gsizes[1], gsizes[2], max_write_timing, write_bw);
+	}
+	MPI_Info_free(&info_used);
+
+return nerrs;
+
+}
 
 int write_cdf( ) {
     int ret, ncfile, nprocs, rank, dimid1, varid1, varid2, ndims=1;
@@ -171,7 +307,7 @@ int read_cdf( ) {
 
 int main(int argc, char **argv) {
 
-	hid_t file_id, dataset_id_1, dataset_id_2, dataspace_id;  /* identifiers */
+	hid_t file_id, int_dataset_id, dbl_dataset_id, dataspace_id;  /* identifiers */
 	hsize_t dims[2];
 	herr_t status;
 	char connector_name[25];
@@ -180,8 +316,9 @@ int main(int argc, char **argv) {
 	hid_t vol_id;
 	char name[25];
 	ssize_t len;
-	int dset_data_1[1024];
-	double dset_data_2[1024];
+	hsize_t bytecnt;
+	int *dset_data_int;
+	double *dset_data_dbl;
 	int nprocs, rank;
 
 	MPI_Init(&argc, &argv);
@@ -189,43 +326,74 @@ int main(int argc, char **argv) {
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
-	if(argc !=2){
-		printf("Input: connector name, e.g., cdf\n");
-		return 0;
+	//if(argc !=2){
+	//	printf("Input: connector name, e.g., cdf\n");
+	//	return 0;
+	//}
+	//strcpy(connector_name,argv[1]);
+	strcpy(connector_name,"cdf");
+
+	if(SIMPLE_TEST) {
+
+		/* Write File with pNetCDF */
+		write_cdf();
+
+		/* Read File with pNetCDF */
+		//read_cdf();
+
+	} else {
+
+		/* Write multi-dimensional dataset */
+		int dlen = 8;
+		int cmode = 0;
+		write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen);
+
 	}
-	strcpy(connector_name,argv[1]);
 
-
-	/* Write File with pNetCDF */
-	write_cdf();
-
-	/* Read File with pNetCDF */
-	read_cdf();
-
+	/* Open File etc */
 	fapl = H5Pcreate (H5P_FILE_ACCESS);
-
 	vol_id = H5VLregister_connector (&H5VL_cdf_g, fapl);
 	assert(vol_id > 0);
 	assert(H5VLis_connector_registered(connector_name) == 1);
-
 	acc_tpl = H5Pcreate (H5P_FILE_ACCESS);
 	H5Pset_fapl_mpio(acc_tpl, MPI_COMM_WORLD, MPI_INFO_NULL);
 	H5Pset_vol(acc_tpl, vol_id, &fapl);
-
 	file_id = H5Fopen(FILE, H5F_ACC_RDWR, acc_tpl);
 
-	dataset_id_1 = H5Dopen(file_id, "v1", H5P_DEFAULT);
-	status = H5Dread(dataset_id_1, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data_1[0]);
-	printf("dset_data_1[%d] = %d\n", rank, dset_data_1[rank]);
-	H5Dclose(dataset_id_1);
+	if(SIMPLE_TEST) {
 
-	MPI_Barrier( MPI_COMM_WORLD );
+		/* Read simple integer dataset */
+		int_dataset_id = H5Dopen(file_id, "v1", H5P_DEFAULT);
+		bytecnt = H5Dget_storage_size(int_dataset_id);
+		dset_data_int = (int *) malloc( bytecnt );
+		status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data_int);
+		printf("dset_data_int[%d] = %d\n", rank, dset_data_int[rank]);
+		H5Dclose(int_dataset_id);
+		free(dset_data_int);
 
-	dataset_id_2 = H5Dopen(file_id, "v2", H5P_DEFAULT);
-	status = H5Dread(dataset_id_2, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dset_data_2[0]);
-	printf("dset_data_2[%d] = %f\n", rank, dset_data_2[rank]);
-	H5Dclose(dataset_id_2);
+		/* Read simple double-precision dataset */
+		dbl_dataset_id = H5Dopen(file_id, "v2", H5P_DEFAULT);
+		bytecnt = H5Dget_storage_size(dbl_dataset_id);
+		dset_data_dbl = (double *) malloc( bytecnt );
+		status = H5Dread(dbl_dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data_dbl);
+		printf("dset_data_dbl[%d] = %f\n", rank, dset_data_dbl[rank]);
+		H5Dclose(dbl_dataset_id);
+		free(dset_data_dbl);
 
+	} else {
+
+		/* Read 3D integer dataset (H5S_ALL) */
+		int_dataset_id = H5Dopen(file_id, "var0", H5P_DEFAULT);
+		bytecnt = H5Dget_storage_size(int_dataset_id);
+		dset_data_int = (int *) malloc( bytecnt );
+		status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data_int);
+		printf("dset_data_int[%d] = %d\n", rank, dset_data_int[rank]);
+		H5Dclose(int_dataset_id);
+		free(dset_data_int);
+
+	}
+
+	/* Close File etc */
 	H5Fclose(file_id);
 	H5Pclose(acc_tpl);
 	H5Pclose(fapl);
