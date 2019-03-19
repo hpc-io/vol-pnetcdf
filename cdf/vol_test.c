@@ -420,7 +420,7 @@ int main(int argc, char **argv) {
 		hsize_t     stride[NDIMS];
 		hsize_t     block[NDIMS];
 		hsize_t     count[NDIMS];              /* size of the hyperslab in the file */
-		hssize_t    offset[NDIMS];             /* hyperslab offset in the file */
+		hsize_t     offset[NDIMS];             /* hyperslab offset in the file */
 		for (i=0; i<NDIMS; i++) {
 			block[i] = dims_out[i] / psizes[i];
 			stride[i] = block[i];
@@ -448,7 +448,7 @@ int main(int argc, char **argv) {
 		hsize_t     stride_out[NDIMS];
 		hsize_t     block_out[NDIMS];
 		hsize_t     count_out[NDIMS];              /* size of the hyperslab in the file */
-		hssize_t    offset_out[NDIMS];             /* hyperslab offset in the file */
+		hsize_t     offset_out[NDIMS];             /* hyperslab offset in the file */
 		int hypersize=1;
 		for (i=0; i<NDIMS; i++) {
 			block_out[i] = block[i];
@@ -466,7 +466,7 @@ int main(int argc, char **argv) {
 		int* data_out = (int *) malloc( hypersize * sizeof(int) );
 		printf("[%d] data_out size = %d integers.\n", rank, hypersize);
 		status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data_out);
-
+		printf("data_out[0] = %d\n", data_out[0]);
 		H5Dclose(int_dataset_id);
 		free(data_out);
 		free(dims_out);

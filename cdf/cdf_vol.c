@@ -13,14 +13,14 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "hdf5.h"
-#include "H5Epublic.h"
+//#include "H5Epublic.h"
 #include "cdf_vol.h"
 
 /* Include HDF5 src files (Ideally these should NOT be needed) */
 //#include "H5Dprivate.h" // H5D_t
 //#include "H5Iprivate.h" // H5I_object_verify
-#define H5S_FRIEND  // suppress error for H5Spkg
-#include "H5Spkg.h" // H5S_hyper_dim
+//#define H5S_FRIEND  // suppress error for H5Spkg
+//#include "H5Spkg.h" // H5S_hyper_dim
 //#define H5O_FRIEND  // suppress error for H5Opkg
 //#include "H5Opkg.h"
 
@@ -1393,23 +1393,31 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	herr_t ret_value=0;
 	cdf_var_t *var = (cdf_var_t *)dset; /* Cast dset to cdf_var_t */
 	H5VL_cdf_t *file = (H5VL_cdf_t *)(var->file); /* Get pointer to file object */
-	MPI_Status status;
-	int i, n;
+	MPI_Status mpi_status;
+	MPI_Datatype subarraytype;
+	char *charbuf = (char *)buf; /* Cast buffer to character for byte arithmetic */
+	size_t dataTypeSize;
+	H5S_sel_type memSelType, h5selType; /* Selection types in memory and file */
+	hsize_t npoints, nblocks_file, nblocks_mem;
+	hsize_t *blockinfo_file;
+	hsize_t *blockinfo_mem;
+	herr_t h5_status;
+	int ndims, i, n;
 
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> In H5VL_cdf_dataset_read\n",file->rank, var->name->string);
 #endif
 
-	size_t dataTypeSize = H5Tget_size(mem_type_id);
-
-	H5S_sel_type memSelType = H5S_SEL_ALL;
+	dataTypeSize = H5Tget_size(mem_type_id);
+	memSelType = H5S_SEL_ALL;
 	if (mem_space_id != 0) {
 		memSelType = H5Sget_select_type(mem_space_id);
 	}
 
-	H5S_sel_type h5selType = H5S_SEL_ALL;
-	if (file_space_id != 0)
+	h5selType = H5S_SEL_ALL;
+	if (file_space_id != 0) {
 		h5selType = H5Sget_select_type(file_space_id);
+	}
 
 	if ((memSelType == H5S_SEL_NONE) || (h5selType == H5S_SEL_NONE)) {
 		/* Nothing was selected, do nothing */
@@ -1419,87 +1427,120 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	if (h5selType == H5S_SEL_ALL) {
 
 #ifdef ENABLE_CDF_VERBOSE
-		printf("[%d] <%s> Reading %llu values for offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
+		printf("[%d] <%s> Reading %llu values for file offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
 		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
-		MPI_File_read_at( file->fh, var->offset, (char *)buf, (var->vsize) , MPI_BYTE, &status );
+		MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
 
 		/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
 		for (i=0; i<(var->vsize); i+=var->nc_type_size){
-			bytestr_rev(&buf[i],var->nc_type_size);
+			bytestr_rev(&charbuf[i],var->nc_type_size);
 		}
 
 	} else if (h5selType == H5S_SEL_HYPERSLABS) {
 		printf("WARNING!!! H5S_SEL_HYPERSLABS is still experimental.\n");
 
-		hsize_t npoints = H5Sget_select_npoints(file_space_id);
+		npoints = H5Sget_select_npoints(file_space_id);
+#ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> Hyperslab selection has %llu points.\n", file->rank, var->name->string, npoints);
+		printf("[%d] <%s> Variable size is %llu.\n", file->rank, var->name->string, var->vsize);
+#endif
 
-		if ((var->vsize) == npoints) {
+		if ((var->vsize) == (npoints * var->nc_type_size)) {
 
 			/* The hyperslab is actually the entire variable, read everything */
 #ifdef ENABLE_CDF_VERBOSE
-			printf("[%d] <%s> Reading %llu values for offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
+			printf("[%d] <%s> Reading %llu values for file offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
 			printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
-			MPI_File_read_at( file->fh, var->offset, (char *)buf, (var->vsize) , MPI_BYTE, &status );
+			MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
 			/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
 			for (i=0; i<(var->vsize); i+=var->nc_type_size){
-				bytestr_rev(&buf[i],var->nc_type_size);
+				bytestr_rev(&charbuf[i],var->nc_type_size);
 			}
 
 		} else {
 
 			/* Hyperslab is a proper subset of elements - create block list */
-			hsize_t nblocks = H5Sget_select_hyper_nblocks(file_space_id);
-			printf("[%d] <%s> nblocks = %llu\n", file->rank, var->name->string, nblocks);
+			nblocks_file = H5Sget_select_hyper_nblocks(file_space_id);
+#ifdef ENABLE_CDF_VERBOSE
+			printf("[%d] <%s> nblocks_file = %llu\n", file->rank, var->name->string, nblocks_file);
+#endif
+			ndims = (var->dimrank);
+			blockinfo_file = (hsize_t *) malloc( sizeof(hsize_t) * 2 * ndims * nblocks_file );
+			h5_status = H5Sget_select_hyper_blocklist(file_space_id, (hsize_t)0, nblocks_file, blockinfo_file);
 
-			H5S_t *space = (H5S_t *) H5I_object_verify(file_space_id, H5I_DATASPACE);
-			int ndims = (var->dimrank);
+			/* Generate product vector for calculating 1-D offsets of N-D arrays */
+			// uint64_t *prodvec = (uint64_t *) malloc (sizeof(uint64_t) * ndims);
+			// uint64_t tmp = 1;
+			// for (i = ndims-1; i >= 0; i--) {
+			// 	prodvec[i] = var->dimlens[i] * tmp;
+			// 	tmp = prodvec[i];
+			// 	printf("[%d] <%s> prodvec[%d] = %llu\n", file->rank, var->name->string, i, prodvec[i]);
+			// }
+			// free(prodvec);
 
-			hsize_t *blockinfo = (hsize_t *) malloc( sizeof(hsize_t) * 2 * ndims * nblocks );
-			herr_t status = H5Sget_select_hyper_blocklist(file_space_id, (hsize_t)0, nblocks, blockinfo);
-
-			void *output_data = (void *) malloc ((var->nc_type_size) * npoints);
-			void *dup = output_data;
-
-			//for (n = 0; n < nblocks; n++) {
-			//	if (file->rank==1) printf("[%d] <%s> blockinfo[%d] = %llu\n",file->rank,var->name->string,n,blockinfo[i]);
-			//}
-
-			for (n = 0; n < nblocks; n++) {
+			for (n = 0; n < nblocks_file; n++) {
 				uint64_t blockSize = 1;
-				uint64_t h_start[ndims], h_count[ndims];
+				int h_sizes[ndims];
+				int h_start[ndims];
+				int h_count[ndims];
 				MPI_Datatype h_types[ndims];
+				int pos = 2 * ndims * n;
 				for (i = 0; i < ndims; i++) {
-					int pos = 2 * ndims * n;
+					h_sizes[i] = var->dimlens[i];
 					h_types[i] = MPI_BYTE;
-					h_start[i] = (blockinfo[pos + i]);
-					h_count[i] = (blockinfo[pos + ndims + i] - h_start[i] + 1);
-					blockSize *= h_count[i];
-					printf("[%d] <%s> h_start[%d] = %llu\n", file->rank, var->name->string, i, h_start[i]);
-					printf("[%d] <%s> h_count[%d] = %llu\n", file->rank, var->name->string, i, h_count[i]);
-				}
-				printf("[%d] <%s> blockSize = %llu\n", file->rank, var->name->string, blockSize);
+					h_start[i] = (blockinfo_file[pos + i]);
+					h_count[i] = (blockinfo_file[pos + ndims + i] - h_start[i] + 1);
 
-				// MPI_Datatype structype;
-				// MPI_Type_create_struct( ndims, h_count, h_start, h_types, &structype );
-				// MPI_Type_commit( &structype );
-				// MPI_File_set_view( file->fh, 0, MPI_BYTE, structype, "native", MPI_INFO_NULL );
-				// MPI_File_read( file->fh, (char *)buf, blockSize, MPI_BYTE, &status );
-				// /* Swap bytes for each value (need to add rigorous test for "when" to do this) */
-				// for (i=0; i<blockSize; i+=var->nc_type_size){
-				// 	bytestr_rev(&buf[i],var->nc_type_size);
-				// }
+					/* We actually want to use 'bytes', so need to multiply 0th dimension */
+					if (i==0) {
+						h_sizes[i] *= var->nc_type_size;
+						h_start[i] *= var->nc_type_size;
+						h_count[i] *= var->nc_type_size;
+					}
+
+					blockSize *= h_count[i];
+#ifdef ENABLE_CDF_VERBOSE
+					printf("[%d] <%s> h_sizes[%d] = %d\n", file->rank, var->name->string, i, h_sizes[i]);
+					printf("[%d] <%s> h_start[%d] = %d\n", file->rank, var->name->string, i, h_start[i]);
+					printf("[%d] <%s> h_count[%d] = %d\n", file->rank, var->name->string, i, h_count[i]);
+#endif
+				}
+#ifdef ENABLE_CDF_VERBOSE
+				printf("[%d] <%s> blockSize = %llu\n", file->rank, var->name->string, blockSize);
+#endif
+				/* We either need to write our own "_get_seq_list" functionality
+				 * OR we can use "MPI_Type_create_subarray" from the hyperslab
+				 * block information.
+				 *
+				 * For now, I will just use "MPI_Type_create_subarray"...
+				 */
+
+				MPI_Type_create_subarray( ndims, h_sizes, h_count, h_start, MPI_ORDER_C, MPI_BYTE, &subarraytype );
+				MPI_Type_commit( &subarraytype );
+				MPI_File_set_view( file->fh, var->offset, MPI_BYTE, subarraytype, "native", MPI_INFO_NULL );
+				MPI_File_read( file->fh, charbuf, blockSize, MPI_BYTE, &mpi_status );
+				/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
+				for (i=0; i<blockSize; i+=var->nc_type_size){
+					bytestr_rev(&charbuf[i],var->nc_type_size);
+				}
+				MPI_Type_free(&subarraytype);
+
+
+
+				///* Now get information about memory hyperslab selection */
+				//nblocks_mem = H5Sget_select_hyper_nblocks(mem_space_id);
+#ifdef ENABLE_CDF_VERBOSE
+				//printf("[%d] <%s> nblocks_mem = %llu\n", file->rank, var->name->string, nblocks_mem);
+#endif
+				//blockinfo_mem = (hsize_t *) malloc( sizeof(hsize_t) * 2 * ndims * nblocks_mem );
+				//h5_status = H5Sget_select_hyper_blocklist(mem_space_id, (hsize_t)0, nblocks_mem, blockinfo_mem);
+
 
 			}
-
-
-
-			free(output_data);
-			free(blockinfo);
-
-
+			free(blockinfo_file);
+			free(blockinfo_mem);
 		}
 
 	} else {
