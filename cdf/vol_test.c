@@ -82,7 +82,7 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len) {
 	/* allocate buffer and initialize with non-zero numbers */
 	for (i=0; i<NUM_VARS; i++) {
 	    buf[i] = (int *) malloc(bufsize * sizeof(int));
-	    for (j=0; j<bufsize; j++) buf[i][j] = rank * i + 123 + j;
+	    for (j=0; j<bufsize; j++) buf[i][j] = (rank+1)*10; // * i + 123 + j;
 	}
 
 	MPI_Barrier(comm);
@@ -346,7 +346,7 @@ int main(int argc, char **argv) {
 	} else {
 
 		/* Write multi-dimensional dataset */
-		int dlen = 8;
+		int dlen = 2;
 		int cmode = 0;
 		write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen);
 
@@ -389,11 +389,11 @@ int main(int argc, char **argv) {
 		bytecnt = H5Dget_storage_size(int_dataset_id);
 		dset_data_int = (int *) malloc( bytecnt );
 		status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data_int);
-		printf("dset_data_int[%d] = %d\n", rank, dset_data_int[rank]);
+		for (i=0; i<16; i++) {
+			printf("dset_data_int[%d] = %d\n", i, dset_data_int[i]);
+		}
 		H5Dclose(int_dataset_id);
 		free(dset_data_int);
-
-
 
 
 		/* Read simple hyperslab selection from var1 */
@@ -466,7 +466,9 @@ int main(int argc, char **argv) {
 		int* data_out = (int *) malloc( hypersize * sizeof(int) );
 		printf("[%d] data_out size = %d integers.\n", rank, hypersize);
 		status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data_out);
-		printf("data_out[0] = %d\n", data_out[0]);
+		for (i=0; i<8; i++) {
+			printf("[%d] data_out[%d] = %d\n", rank, i, data_out[i]);
+		}
 		H5Dclose(int_dataset_id);
 		free(data_out);
 		free(dims_out);
