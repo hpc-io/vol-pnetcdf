@@ -85,6 +85,7 @@ typedef struct cdf_dim_t {
 /* CDF attribute object (structure) */
 typedef struct cdf_att_t {
 	cdf_name_t *name;
+	void *file; /* "void" Pointer back to parent file object */
 	cdf_nc_type_t nc_type;
 	cdf_non_neg_t nvals;
 	void *values;
@@ -165,6 +166,9 @@ static herr_t H5VL_cdf_init(hid_t vipl_id);
 static herr_t H5VL_cdf_term(void);
 
 /* Attribute callbacks */
+void *H5VL_cdf_attr_open(void *obj, const H5VL_loc_params_t *loc_params, const char *attr_name, hid_t aapl_id, hid_t dxpl_id, void **req);
+herr_t H5VL_cdf_attr_read(void *obj, hid_t dtype_id, void *buf, hid_t dxpl_id, void **req);
+herr_t H5VL_cdf_attr_close(void *obj, hid_t dxpl_id, void **req);
 
 /* Dataset callbacks */
 void *H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t dapl_id, hid_t dxpl_id, void **req);
@@ -210,13 +214,13 @@ const H5VL_class_t H5VL_cdf_g = {
     NULL, //H5VL_cdf_free_wrap_ctx,                /* free_wrap_ctx */
     {                                           /* attribute_cls */
         NULL, //H5VL_cdf_attr_create,                       /* create */
-        NULL, //H5VL_cdf_attr_open,                         /* open */
-        NULL, //H5VL_cdf_attr_read,                         /* read */
+        H5VL_cdf_attr_open,                         /* open */
+        H5VL_cdf_attr_read,                         /* read */
         NULL, //H5VL_cdf_attr_write,                        /* write */
         NULL, //H5VL_cdf_attr_get,                          /* get */
         NULL, //H5VL_cdf_attr_specific,                     /* specific */
         NULL, //H5VL_cdf_attr_optional,                     /* optional */
-        NULL, //H5VL_cdf_attr_close                         /* close */
+        H5VL_cdf_attr_close                         /* close */
     },
     {                                           /* dataset_cls */
         NULL, //H5VL_cdf_dataset_create,                    /* create */
@@ -920,6 +924,9 @@ get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t natts) {
 		/* Get attribute name */
 		atts[iatt].name = get_cdf_name_t(file, rdoff);
 
+		/* Define a void pointer to parent file object */
+		atts[iatt].file = (void *)file;
+
 		/* Get attribute type */
 		atts[iatt].nc_type = get_uint32_t(file,rdoff);
 #ifdef ENABLE_CDF_VERBOSE
@@ -1435,6 +1442,112 @@ H5VL_cdf_file_close(void *file, hid_t dxpl_id, void **req)
     return ret_value;
 } /* end H5VL_cdf_file_close() */
 
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_attr_open
+ *
+ * Purpose      Open attribute (For now, this must be BY NAME)
+*
+ * Return:      Pinter to attribute object
+ *
+ *-------------------------------------------------------------------------
+ */
+void *
+H5VL_cdf_attr_open(void *obj, const H5VL_loc_params_t *loc_params, const char *attr_name,
+                   hid_t aapl_id, hid_t dxpl_id, void **req)
+{
+	void *ret_value = NULL; /* Return value */
+	H5VL_cdf_t *file;
+	cdf_var_t * var;
+	cdf_att_t *atts;
+	cdf_non_neg_t natts;
+	int rank;
+
+	//printf("[%d] <%d> <%d> <<%d>> Looking for attribute with name = %s\n",file->rank, loc_params->type, H5VL_OBJECT_BY_NAME, loc_params->obj_type, attr_name);
+
+	// H5I_FILE        = 1,        /* type ID for File objects                     */
+	// H5I_GROUP,                  /* type ID for Group objects                    */
+	// H5I_DATATYPE,               /* type ID for Datatype objects                 */
+	// H5I_DATASPACE,              /* type ID for Dataspace objects                */
+	// H5I_DATASET,                /* type ID for Dataset objects                  */
+	// H5I_ATTR,                   /* type ID for Attribute objects                */
+
+	if (loc_params->obj_type == H5I_FILE) {
+
+		file = (H5VL_cdf_t *)obj;
+		natts = file->natts;
+		atts = file->atts;
+		rank = file->rank;
+
+	} else if (loc_params->obj_type == H5I_DATASET) {
+
+		var = (cdf_var_t *)obj;
+		natts = var->natts;
+		atts = var->atts;
+		rank = ((H5VL_cdf_t *)var->file)->rank;
+
+	} else {
+		printf("ERROR -- H5VL_cdf_attr_open loc_params->obj_type not supported yet.\n");
+	}
+
+	//if(loc_params->type == H5VL_OBJECT_BY_NAME) {
+		for (int iatt=0; iatt<natts; iatt++ ){
+			cdf_att_t *attr = &(atts[iatt]);
+			if ( !strcmp( attr->name->string, attr_name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+				printf("[%d] <%s> <%s> ATTRIBUTE MATCH!\n",rank, attr->name->string, attr_name);
+#endif
+				ret_value = (void *)attr;
+				break;
+			}
+		}
+	//} else {
+	//	printf("ERROR -- H5VL_cdf_attr_open option not supported yet.\n");
+	//}
+
+	/* TODO: Need to add more useful error handling here (if name is not found etc) */
+
+	return ret_value;
+}
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_attr_read
+ *
+ * Purpose      Read the attribute using memcpy from cdf_att_t object.
+*
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *
+ *-------------------------------------------------------------------------
+ */
+herr_t
+H5VL_cdf_attr_read(void *obj, hid_t dtype_id, void *buf, hid_t dxpl_id, void **req)
+{
+	herr_t ret_value = 0;
+	cdf_att_t *attr = (cdf_att_t *)obj;
+
+	/* We already read this when we opened the file. Just do a memory copy */
+	memcpy(buf, attr->values, (attr->nvals * attr->nc_type_size));
+
+	return ret_value;
+}
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_cdf_attr_close
+ *
+ * Purpose      Close attribute (not really used in this VOL)
+*
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *
+ *-------------------------------------------------------------------------
+ */
+herr_t
+H5VL_cdf_attr_close(void *obj, hid_t dxpl_id, void **req) {
+	herr_t ret_value=0;
+	obj = NULL;
+	/* Don't need to free anything (taken care of when file is closed) */
+	return ret_value;
+}
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_dataset_open
@@ -1467,7 +1580,7 @@ H5VL_cdf_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
 		}
 	}
 
-	/* Need to add more useful error handling here (if group name is not found etc) */
+	/* TODO: Need to add more useful error handling here (if group name is not found etc) */
 
 	return ret_value;
 } /* end H5VL_cdf_dataset_open() */

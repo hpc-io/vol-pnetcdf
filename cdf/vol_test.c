@@ -58,6 +58,8 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len) {
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset write_size, sum_write_size;
 	MPI_Info info_used;
+	char attrbuf[13] = "Hello World\n";
+	char varattrbuf[13] = "Hello Var01\n";
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -111,6 +113,14 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len) {
 		err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids, &varids[i]);
 		handle_error(err, __LINE__);
 	}
+
+	/* Write attribute (Attached to file) */
+	err = ncmpi_put_att_text(ncid, NC_GLOBAL, "string", 13, attrbuf);
+	handle_error(err, __LINE__);
+
+	/* Write attribute (Attached to variable #1) */
+	err = ncmpi_put_att_text(ncid, varids[1], "varstring", 13, varattrbuf);
+	handle_error(err, __LINE__);
 
 	/* exit the define mode */
 	err = ncmpi_enddef(ncid); handle_error(err, __LINE__);
@@ -309,13 +319,24 @@ int main(int argc, char **argv) {
 			printf("ERROR!!! ~~~ [%d] data_out[%d] = %d\n", rank, i, data_out[i]);
 		}
 	}
-	H5Dclose(int_dataset_id);
 	free(dset_data_int);
 	free(data_out);
 	free(dims_out);
 
+	/* Read Attribute */
+	hid_t attr1, attr2;
+	char attr_data[13];
+	char var_attr_data[13];
+	attr1 = H5Aopen_name (file_id, "string");
+	H5Aread(attr1, H5T_NATIVE_CHAR, attr_data);
+	attr2 = H5Aopen_name (int_dataset_id, "varstring");
+	H5Aread(attr2, H5T_NATIVE_CHAR, var_attr_data);
+	H5Dclose(int_dataset_id);
+
 	/* Summarize the results */
 	if (rank == 0) {
+		printf(" File Attribute = %s", attr_data);
+		printf(" Variable Attribute = %s", var_attr_data);
 		printf(" FILE_OPEN:   time[s]=%f\n", max_open_time);
 		size_rpt = ((double)sum_read_size_all) / 1048576.0;
 		printf(" READ_ALL:    size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n", size_rpt, max_read_time_all, size_rpt/max_read_time_all);
@@ -324,6 +345,8 @@ int main(int argc, char **argv) {
 	}
 
 	/* Close File etc */
+	H5Aclose(attr1);
+	H5Aclose(attr2);
 	H5Fclose(file_id);
 	H5Pclose(acc_tpl);
 	H5Pclose(dxpl_plist_id);
