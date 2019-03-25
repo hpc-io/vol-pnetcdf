@@ -2,7 +2,6 @@
  * Purpose:     This is a CDF file-format VOL connector.
  */
 
-
 /* Header files needed */
 /* (Public HDF5 and standard C / POSIX only) */
 #include <assert.h>
@@ -21,29 +20,31 @@
 
 /* Whether to display log messages when callback is invoked */
 /* (Uncomment to enable) */
-#define ENABLE_CDF_LOGGING
-#define ENABLE_CDF_VERBOSE
+//#define ENABLE_CDF_LOGGING
+//#define ENABLE_CDF_VERBOSE
 #ifdef H5_HAVE_PARALLEL
 #define H5_VOL_HAVE_PARALLEL  /* Comment if you want to turn off MPI-IO */
 #endif
-
-/* Hack for missing va_copy() in old Visual Studio editions
- * (from H5win2_defs.h - used on VS2012 and earlier)
- */
-#if defined(_WIN32) && defined(_MSC_VER) && (_MSC_VER < 1800)
-#define va_copy(D,S)      ((D) = (S))
-#endif
-
 
 /************************* */
 /* Borrowed from ADIOS VOL */
 /************************* */
 
+/* Structure for data flattening */
 typedef struct {
-	hsize_t posCompact;  // e.g. 0,1,2,3
-	hsize_t posInSource; // e.g. 3,5,8,9
+	hsize_t posCompact;  // Element index in intermediate compact flattened buffer
+	hsize_t posInSource; // Element index in HDF5 file/memory
 } H5_posMap;
 
+/* Helper comparison function for sorting */
+int cmpfuncWobble(const void *a, const void *b) {
+	H5_posMap *wa = (H5_posMap *)a;
+	H5_posMap *wb = (H5_posMap *)b;
+	return (wa->posInSource - wb->posInSource);
+}
+void traverseBlock(int ndim, int currDim, hsize_t *start, hsize_t *count, hsize_t *m, hsize_t previous, H5_posMap **result);
+void getMultiplier(int ndim, hsize_t *dims, hsize_t *result);
+void assignToMemSpace(H5_posMap *sourceSelOrderInC, H5_posMap *targetSelOrderInC, hsize_t npoints, size_t dataTypeSize, char *compactData, char *buf);
 static void GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result);
 
 /************/
@@ -280,16 +281,17 @@ const H5VL_class_t H5VL_cdf_g = {
 /* The connector identification number, initialized at runtime */
 static hid_t H5VL_CDF_g = H5I_INVALID_HID;
 
-int cmpfuncWobble(const void *a, const void *b) {
-	H5_posMap *wa = (H5_posMap *)a;
-	H5_posMap *wb = (H5_posMap *)b;
-	return (wa->posInSource - wb->posInSource);
-}
-
-
-// traverseBlock(ndim, 0, h_start, h_count, mm, 0, result);
-
-void traverseBlock(int ndim, int currDim, hsize_t *start, hsize_t *count,
+/*-------------------------------------------------------------------------
+ * Function:    traverseBlock
+ *
+ * Purpose:     Recursive function used to generate a flattened representation
+ *              of the hyperslab selection. (Borrowed from ADIOS VOL)
+ *
+ * Return:      Void
+ *-------------------------------------------------------------------------
+ */
+void
+traverseBlock(int ndim, int currDim, hsize_t *start, hsize_t *count,
                    hsize_t *m, hsize_t previous, H5_posMap **result) {
 	hsize_t k, n, pos, nextCompactPos, base;
 	if (ndim == currDim + 1) {
@@ -309,7 +311,17 @@ void traverseBlock(int ndim, int currDim, hsize_t *start, hsize_t *count,
 	}
 }
 
-void getMultiplier(int ndim, hsize_t *dims, hsize_t *result) {
+/*-------------------------------------------------------------------------
+ * Function:    getMultiplier
+ *
+ * Purpose:     Calculate the simple "multiplier" array for generating a
+ *              flat offset from array coordinates. (Borrowed from ADIOS VOL)
+ *
+ * Return:      Void
+ *-------------------------------------------------------------------------
+ */
+void
+getMultiplier(int ndim, hsize_t *dims, hsize_t *result) {
 	int n, k;
 	for (n = 0; n < ndim; n++) {
 		result[n] = 1;
@@ -319,7 +331,15 @@ void getMultiplier(int ndim, hsize_t *dims, hsize_t *result) {
 	}
 }
 
-// assignToMemSpace(sourceSelOrderInC, targetSelOrderInC, npoints, var->nc_type_size, output_data, charbuf);
+/*-------------------------------------------------------------------------
+ * Function:    assignToMemSpace
+ *
+ * Purpose:     Copy data from the contiguous/compact array (compactData)
+ *              to the target selection (buf). (Borrowed from ADIOS VOL)
+ *
+ * Return:      Void
+ *-------------------------------------------------------------------------
+ */
 void assignToMemSpace(H5_posMap *sourceSelOrderInC,
                       H5_posMap *targetSelOrderInC, hsize_t npoints,
                       size_t dataTypeSize, char *compactData, char *buf) {
@@ -447,7 +467,7 @@ cdf_cache_read(H5VL_cdf_t* file, off_t *rdoff, char *buf, MPI_Offset count)
 	if (file->cache_offset < 0) {
 
 			rdsize = H5VL_CFD_MIN( H5VL_CDF_CACHE_SIZE, (file->size)-(file->cache_offset) );
-			printf("Initializing cache to size = %llu\n", rdsize);
+			//printf("Initializing cache to size = %llu\n", rdsize);
 			file->cache_offset = 0;
 			if (file->rank==0)
 				MPI_File_read_at( file->fh, file->cache_offset, file->cache, rdsize, MPI_BYTE, &status );
@@ -1468,22 +1488,6 @@ H5VL_cdf_dataset_get(void *obj, H5VL_dataset_get_t get_type, hid_t dxpl_id,
   cdf_var_t *var = (cdf_var_t *)obj;
   herr_t ret_value = 0; /* Return value */
 
-	// /* CDF variable object (structure) */
-	// typedef struct cdf_var_t {
-	// 	cdf_name_t *name;
-	// 	void *file; /* "void" Pointer back to parent file object */
-	// 	cdf_non_neg_t offset; /* Offset byte in file for this variable (begin) */
-	// 	cdf_non_neg_t vsize; /* vsize */
-	// 	cdf_nc_type_t nc_type; /* var data type */
-	// 	int nc_type_size;
-	// 	cdf_non_neg_t dimrank; /* Dimensionality (rank) of this variable */
-	// 	cdf_non_neg_t *dimids; /* Dimension ID (index into dim_list) for variable
-	//                           * shape. We say this is a "record variable" if and only
-	//                           * if the first dimension is the record dimension.  */
-	// 	cdf_non_neg_t natts; /* number of attributes for this var */
-	// 	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
-	// } cdf_var_t;
-
 	switch (get_type) {
 
 	/* H5Dget_space */
@@ -1497,23 +1501,22 @@ H5VL_cdf_dataset_get(void *obj, H5VL_dataset_get_t get_type, hid_t dxpl_id,
 			//// not sure how the local variables will behave here
 			//// right now retrieve the datablock specified todimInfo in createVar()
 			//*ret_id = H5Screate_simple(var->dimInfo->ndim, var->dimInfo->dims, NULL);
-
 			//H5VL_cdf_t *file = (H5VL_cdf_t *) (var->file);
 			*ret_id = H5Screate_simple(var->dimrank, var->dimlens, NULL);
 		}
 		break;
 	}
-	case H5VL_DATASET_GET_TYPE: {
+	//case H5VL_DATASET_GET_TYPE: {
 		//// ADIOS VOL Code:
 		//struct adios_index_comp_struct_v1 *varInAdios = adios_get_var_byname(var->fileReader, var->name);
 		//*ret_id = toHDF5type(varInAdios);
-		break;
-	}
-	case H5VL_DATASET_GET_DCPL: {
+		//break;
+	//}
+	//case H5VL_DATASET_GET_DCPL: {
 		//// ADIOS VOL Code:
 		//*ret_id = H5Pcreate(H5P_DATASET_CREATE);
-		break;
-	}
+		//break;
+	//}
 	case H5VL_DATASET_GET_STORAGE_SIZE: {
 		hsize_t *ret = va_arg(arguments, hsize_t *);
 		*ret = (hsize_t)(var->vsize);
@@ -1549,7 +1552,7 @@ H5VL_cdf_dataset_close(void *dset, hid_t dxpl_id, void **req) {
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_dataset_read
  *
- * Purpose:	Reads data from dataset through the VOL
+ * Purpose:     Reads data from dataset through the VOL
 *
  * Return:      Success:    Non-negative
  *              Failure:    Negative
@@ -1574,6 +1577,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	H5_posMap *sourceSelOrderInC = NULL;
 	H5_posMap *targetSelOrderInC = NULL;
 #ifdef H5_VOL_HAVE_PARALLEL
+	H5FD_mpio_xfer_t xfer_mode = H5FD_MPIO_INDEPENDENT;
 	MPI_Status mpi_status;
 	MPI_Datatype structtype;
 #endif
@@ -1598,6 +1602,13 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		return 0;
 	}
 
+#ifdef H5_VOL_HAVE_PARALLEL
+	H5Pget_dxpl_mpio(plist_id, &xfer_mode);
+#ifdef ENABLE_CDF_VERBOSE
+	printf("[%d] <%s> xfer_mode %d\n", file->rank, var->name->string, xfer_mode);
+#endif
+#endif
+
 	if (h5selType == H5S_SEL_ALL) {
 
 #ifdef ENABLE_CDF_VERBOSE
@@ -1606,7 +1617,10 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 #endif
 #ifdef H5_VOL_HAVE_PARALLEL
 		/* Use MPI-IO to read entire variable */
-		MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+		if (xfer_mode == H5FD_MPIO_COLLECTIVE)
+			MPI_File_read_at_all( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+		else
+			MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
 #else
 		/* Use POSIX to read entire variable */
 		pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
@@ -1618,8 +1632,6 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		}
 
 	} else if (h5selType == H5S_SEL_HYPERSLABS) {
-		printf("WARNING!!! H5S_SEL_HYPERSLABS is still experimental.\n");
-
 		/* Generate arrays of flattened positions for each point in the selection.
 		 * The H5_posMap type will have an index (posCompact), and a position in
 		 * file or memory space (posInSource).  The position is the element index
@@ -1629,12 +1641,6 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		GetSelOrder(mem_space_id, memSelType, &targetSelOrderInC);
 		npoints = H5Sget_select_npoints(file_space_id);
 		npoints_mem = H5Sget_select_npoints(mem_space_id);
-#ifdef ENABLE_CDF_VERBOSE
-		//for (i=0; i<npoints_mem; i++) {
-			//printf("[%d] <%s> SOURCE[%d] posInSource = %llu (posCompact = %llu)\n",file->rank,var->name->string,i,sourceSelOrderInC[i].posInSource,sourceSelOrderInC[i].posCompact);
-			//printf("[%d] <%s> TARGET[%d] posInSource = %llu (posCompact = %llu)\n",file->rank,var->name->string,i,targetSelOrderInC[i].posInSource,targetSelOrderInC[i].posCompact);
-		//}
-#endif
 
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> Hyperslab selection has %llu points.\n", file->rank, var->name->string, npoints);
@@ -1722,13 +1728,15 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 				last_ind = this_ind;
 			}
 			max_chunks = (chunk_ind+1);
-			printf("[%d] <%s> REAL max_chunks = %llu (offset[0] = %lld)\n", file->rank, var->name->string, max_chunks, chunk_off[0]);
 
 #ifdef H5_VOL_HAVE_PARALLEL
 			MPI_Type_create_struct( (int)max_chunks, chunk_len, chunk_off, chunk_typ, &structtype );
 			MPI_Type_commit( &structtype );
 			MPI_File_set_view( file->fh, var->offset, MPI_BYTE, structtype, "native", MPI_INFO_NULL );
-			MPI_File_read( file->fh, output_data, (npoints * var->nc_type_size), MPI_BYTE, &mpi_status );
+			if (xfer_mode == H5FD_MPIO_COLLECTIVE)
+				MPI_File_read_all( file->fh, output_data, (npoints * var->nc_type_size), MPI_BYTE, &mpi_status );
+			else
+				MPI_File_read( file->fh, output_data, (npoints * var->nc_type_size), MPI_BYTE, &mpi_status );
 			MPI_Type_free(&structtype);
 #else
 			/* POSIX-based read (Just read one chunk at a time) */
