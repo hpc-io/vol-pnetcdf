@@ -322,6 +322,8 @@ int main(int argc, char **argv) {
 	int *dset_data_int;
 	double *dset_data_dbl;
 	int nprocs, rank, i;
+	int dlen;
+	int cmode;
 
 	MPI_Init(&argc, &argv);
 
@@ -346,8 +348,8 @@ int main(int argc, char **argv) {
 	} else {
 
 		/* Write multi-dimensional dataset */
-		int dlen = 2;
-		int cmode = 0;
+		dlen = 2;
+		cmode = 0;
 		write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen);
 
 	}
@@ -389,90 +391,92 @@ int main(int argc, char **argv) {
 		bytecnt = H5Dget_storage_size(int_dataset_id);
 		dset_data_int = (int *) malloc( bytecnt );
 		status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data_int);
-		for (i=0; i<16; i++) {
-			printf("dset_data_int[%d] = %d\n", i, dset_data_int[i]);
+		printf("[%d] data_out size = %llu integers.\n", rank, bytecnt/sizeof(int) );
+		for (i=0; i<dlen*NDIMS; i++) {
+			printf("[%d] dset_data_int[%d] = %d\n", rank, i, dset_data_int[i]);
 		}
 		H5Dclose(int_dataset_id);
 		free(dset_data_int);
 
+		if (1) {
+			/* Read simple hyperslab selection from var1 */
+			int_dataset_id = H5Dopen(file_id, "var1", H5P_DEFAULT);
+			dset_data_int = (int *) malloc( H5Dget_storage_size(int_dataset_id) );
+			hid_t dataspace = H5Dget_space (int_dataset_id);    /* dataspace handle */
+			int dimrank      = H5Sget_simple_extent_ndims (dataspace);
+			hsize_t *dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
+			int status_n  = H5Sget_simple_extent_dims (dataspace, dims_out, NULL);
+			printf("\nDim-Rank: %d -- Dimensions: %lu x %lu x %lu\n", dimrank, (unsigned long)(dims_out[0]), (unsigned long)(dims_out[1]), (unsigned long)(dims_out[2]));
+			int psizes[NDIMS];
+			MPI_Offset starts[NDIMS];
+			for (i=0; i<NDIMS; i++)
+				psizes[i] = 0;
+			MPI_Dims_create(nprocs, NDIMS, psizes);
+			starts[0] = rank % psizes[0];
+			starts[1] = (rank / psizes[1]) % psizes[1];
+			starts[2] = (rank / (psizes[0] * psizes[1])) % psizes[2];
+			printf("[%d] starts = %llu %llu %llu\n", rank, starts[0], starts[1], starts[2]);
+			printf("[%d] psizes = %d %d %d\n", rank, psizes[0], psizes[1], psizes[2]);
+			/*
+			 * Define hyperslab in the dataset.
+			 */
+			hsize_t     stride[NDIMS];
+			hsize_t     block[NDIMS];
+			hsize_t     count[NDIMS];              /* size of the hyperslab in the file */
+			hsize_t     offset[NDIMS];             /* hyperslab offset in the file */
+			for (i=0; i<NDIMS; i++) {
+				block[i] = dims_out[i] / psizes[i];
+				stride[i] = block[i];
+				count[i] = 1;
+				offset[i] = starts[i] * block[i];
+			}
+			herr_t status_h5 = H5Sselect_hyperslab (dataspace, H5S_SELECT_SET, offset, stride, count, block);
+			printf("[%d] offset = %llu %llu %llu\n", rank, offset[0], offset[1], offset[2]);
+			printf("[%d] stride = %llu %llu %llu\n", rank, stride[0], stride[1], stride[2]);
+			printf("[%d] count = %llu %llu %llu\n", rank, count[0], count[1], count[2]);
+			printf("[%d] block = %llu %llu %llu\n", rank, block[0], block[1], block[2]);
 
-		/* Read simple hyperslab selection from var1 */
-		int_dataset_id = H5Dopen(file_id, "var1", H5P_DEFAULT);
-		dset_data_int = (int *) malloc( H5Dget_storage_size(int_dataset_id) );
-		hid_t dataspace = H5Dget_space (int_dataset_id);    /* dataspace handle */
-		int dimrank      = H5Sget_simple_extent_ndims (dataspace);
-		hsize_t *dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
-		int status_n  = H5Sget_simple_extent_dims (dataspace, dims_out, NULL);
-		printf("\nDim-Rank: %d -- Dimensions: %lu x %lu x %lu\n", dimrank, (unsigned long)(dims_out[0]), (unsigned long)(dims_out[1]), (unsigned long)(dims_out[2]));
-		int psizes[NDIMS];
-		MPI_Offset starts[NDIMS];
-		for (i=0; i<NDIMS; i++)
-			psizes[i] = 0;
-		MPI_Dims_create(nprocs, NDIMS, psizes);
-		starts[0] = rank % psizes[0];
-		starts[1] = (rank / psizes[1]) % psizes[1];
-		starts[2] = (rank / (psizes[0] * psizes[1])) % psizes[2];
-		printf("[%d] starts = %llu %llu %llu\n", rank, starts[0], starts[1], starts[2]);
-		printf("[%d] psizes = %d %d %d\n", rank, psizes[0], psizes[1], psizes[2]);
-		/*
-		 * Define hyperslab in the dataset.
-		 */
-		hsize_t     stride[NDIMS];
-		hsize_t     block[NDIMS];
-		hsize_t     count[NDIMS];              /* size of the hyperslab in the file */
-		hsize_t     offset[NDIMS];             /* hyperslab offset in the file */
-		for (i=0; i<NDIMS; i++) {
-			block[i] = dims_out[i] / psizes[i];
-			stride[i] = block[i];
-			count[i] = 1;
-			offset[i] = starts[i] * block[i];
-		}
-		herr_t status_h5 = H5Sselect_hyperslab (dataspace, H5S_SELECT_SET, offset, stride, count, block);
-		printf("[%d] offset = %llu %llu %llu\n", rank, offset[0], offset[1], offset[2]);
-		printf("[%d] stride = %llu %llu %llu\n", rank, stride[0], stride[1], stride[2]);
-		printf("[%d] count = %llu %llu %llu\n", rank, count[0], count[1], count[2]);
-		printf("[%d] block = %llu %llu %llu\n", rank, block[0], block[1], block[2]);
+			/*
+			 * Define the memory dataspace.
+			 */
+			hsize_t dimsm[NDIMS];
+			for (i=0; i<NDIMS; i++) {
+				dimsm[i] = block[i];
+			}
+			hid_t memspace = H5Screate_simple (NDIMS, dimsm, NULL);
 
-		/*
-		 * Define the memory dataspace.
-		 */
-		hsize_t dimsm[NDIMS];
-		for (i=0; i<NDIMS; i++) {
-			dimsm[i] = count[i];
-		}
-		hid_t memspace = H5Screate_simple (NDIMS, dimsm, NULL);
+			/*
+			 * Define memory hyperslab.
+			 */
+			hsize_t     stride_out[NDIMS];
+			hsize_t     block_out[NDIMS];
+			hsize_t     count_out[NDIMS];              /* size of the hyperslab in the file */
+			hsize_t     offset_out[NDIMS];             /* hyperslab offset in the file */
+			int hypersize=1;
+			for (i=0; i<NDIMS; i++) {
+				block_out[i] = block[i];
+				stride_out[i] = block[i];
+				count_out[i] = 1;
+				offset_out[i] = 0;
+				hypersize *= block[i];
+			}
+			status_h5 = H5Sselect_hyperslab (memspace, H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
 
-		/*
-		 * Define memory hyperslab.
-		 */
-		hsize_t     stride_out[NDIMS];
-		hsize_t     block_out[NDIMS];
-		hsize_t     count_out[NDIMS];              /* size of the hyperslab in the file */
-		hsize_t     offset_out[NDIMS];             /* hyperslab offset in the file */
-		int hypersize=1;
-		for (i=0; i<NDIMS; i++) {
-			block_out[i] = block[i];
-			stride_out[i] = block[i];
-			count_out[i] = 1;
-			offset_out[i] = 0;
-			hypersize *= block[i];
+			/*
+			 * Read data from hyperslab in the file into the hyperslab in
+			 * memory and display.
+			 */
+			int* data_out = (int *) malloc( hypersize * sizeof(int) );
+			printf("[%d] data_out size = %d integers.\n", rank, hypersize);
+			status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data_out);
+			for (i=0; i<8; i++) {
+				printf("[%d] data_out[%d] = %d\n", rank, i, data_out[i]);
+			}
+			H5Dclose(int_dataset_id);
+			free(dset_data_int);
+			free(data_out);
+			free(dims_out);
 		}
-		status_h5 = H5Sselect_hyperslab (memspace, H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
-
-		/*
-		 * Read data from hyperslab in the file into the hyperslab in
-		 * memory and display.
-		 */
-		int* data_out = (int *) malloc( hypersize * sizeof(int) );
-		printf("[%d] data_out size = %d integers.\n", rank, hypersize);
-		status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data_out);
-		for (i=0; i<8; i++) {
-			printf("[%d] data_out[%d] = %d\n", rank, i, data_out[i]);
-		}
-		H5Dclose(int_dataset_id);
-		free(data_out);
-		free(dims_out);
-		free(dset_data_int);
 	}
 
 	/* Close File etc */

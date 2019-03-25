@@ -13,20 +13,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "hdf5.h"
-//#include "H5Epublic.h"
 #include "cdf_vol.h"
-
-#ifdef H5_HAVE_PARALLEL
-#define H5_VOL_HAVE_PARALLEL  /* Comment if you want to turn off MPI-IO */
-#endif
-
-/* Include HDF5 src files (Ideally these should NOT be needed) */
-//#include "H5Dprivate.h" // H5D_t
-//#include "H5Iprivate.h" // H5I_object_verify
-//#define H5S_FRIEND  // suppress error for H5Spkg
-//#include "H5Spkg.h" // H5S_hyper_dim
-//#define H5O_FRIEND  // suppress error for H5Opkg
-//#include "H5Opkg.h"
 
 /**********/
 /* Macros */
@@ -36,6 +23,9 @@
 /* (Uncomment to enable) */
 #define ENABLE_CDF_LOGGING
 #define ENABLE_CDF_VERBOSE
+#ifdef H5_HAVE_PARALLEL
+#define H5_VOL_HAVE_PARALLEL  /* Comment if you want to turn off MPI-IO */
+#endif
 
 /* Hack for missing va_copy() in old Visual Studio editions
  * (from H5win2_defs.h - used on VS2012 and earlier)
@@ -51,7 +41,7 @@
 
 typedef struct {
 	hsize_t posCompact;  // e.g. 0,1,2,3
-	hsize_t posInSource; // e.g. 3,5,8.9
+	hsize_t posInSource; // e.g. 3,5,8,9
 } H5_posMap;
 
 static void GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result);
@@ -153,8 +143,8 @@ static H5VL_cdf_t *H5VL_cdf_new_obj(int fd);
 #endif
 static herr_t H5VL_cdf_free_obj(H5VL_cdf_t *obj);
 static void bytestr_rev(char *p, int size);
-static uint32_t bytestr_to_uint32_t(char *bytestr);
-static uint64_t bytestr_to_uint64_t(char *bytestr);
+static uint32_t bytestr_to_uint32_t(uint8_t *bytestr);
+static uint64_t bytestr_to_uint64_t(uint8_t *bytestr);
 static uint32_t get_uint32_t(H5VL_cdf_t* file, off_t *rdoff);
 static uint64_t get_uint64_t(H5VL_cdf_t* file, off_t *rdoff);
 static cdf_non_neg_t get_non_neg(H5VL_cdf_t* file, off_t *rdoff);
@@ -296,6 +286,9 @@ int cmpfuncWobble(const void *a, const void *b) {
 	return (wa->posInSource - wb->posInSource);
 }
 
+
+// traverseBlock(ndim, 0, h_start, h_count, mm, 0, result);
+
 void traverseBlock(int ndim, int currDim, hsize_t *start, hsize_t *count,
                    hsize_t *m, hsize_t previous, H5_posMap **result) {
 	hsize_t k, n, pos, nextCompactPos, base;
@@ -326,38 +319,40 @@ void getMultiplier(int ndim, hsize_t *dims, hsize_t *result) {
 	}
 }
 
+// assignToMemSpace(sourceSelOrderInC, targetSelOrderInC, npoints, var->nc_type_size, output_data, charbuf);
 void assignToMemSpace(H5_posMap *sourceSelOrderInC,
-                      H5_posMap *targetSelOrderInC, hsize_t total,
-                      size_t dataTypeSize, char *adiosData, char *buf) {
+                      H5_posMap *targetSelOrderInC, hsize_t npoints,
+                      size_t dataTypeSize, char *compactData, char *buf) {
   size_t k;
   hsize_t n;
 
   if (sourceSelOrderInC == NULL) { // fileSpace=ALL memSpace=partial
-    for (n = 0; n < total; n++) {
+    for (n = 0; n < npoints; n++) {
       hsize_t dd = n;
       hsize_t ss = targetSelOrderInC[n].posInSource;
       for (k = 0; k < dataTypeSize; k++) {
-        buf[ss * dataTypeSize + k] = adiosData[dd * dataTypeSize + k];
+        buf[ss * dataTypeSize + k] = compactData[dd * dataTypeSize + k];
       }
     }
     return;
   }
   if (targetSelOrderInC == NULL) {
-    for (n = 0; n < total; n++) {
+    for (n = 0; n < npoints; n++) {
       hsize_t dd = sourceSelOrderInC[n].posCompact;
       hsize_t ss = n;
       for (k = 0; k < dataTypeSize; k++) {
-        buf[ss * dataTypeSize + k] = adiosData[dd * dataTypeSize + k];
+        buf[ss * dataTypeSize + k] = compactData[dd * dataTypeSize + k];
       }
     }
     return;
   }
 
-  for (n = 0; n < total; n++) {
+  for (n = 0; n < npoints; n++) {
     hsize_t ss = targetSelOrderInC[n].posInSource;
     hsize_t dd = sourceSelOrderInC[n].posCompact;
+    //printf("Copying index %llu in Compact to %llu in buf.\n",dd,ss);
     for (k = 0; k < dataTypeSize; k++) {
-      buf[ss * dataTypeSize + k] = adiosData[dd * dataTypeSize + k];
+      buf[ss * dataTypeSize + k] = compactData[dd * dataTypeSize + k];
     }
   }
 }
@@ -411,6 +406,7 @@ GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result) {
 			h_count[i] = blockinfo[pos + ndim + i] - h_start[i] + 1;
 			blockSize *= h_count[i];
 		}
+		//printf(" got block: start[%llu, %llu, %llu], count[%llu, %llu, %llu], mm[%llu, %llu, %llu]\n", h_start[0], h_start[1], h_start[2], h_count[0], h_count[1], h_count[2], mm[0], mm[1], mm[2]);
 		traverseBlock(ndim, 0, h_start, h_count, mm, 0, result);
 	}
 
@@ -530,12 +526,15 @@ bytestr_rev(char *p, int size)
  *-------------------------------------------------------------------------
  */
 static uint32_t
-bytestr_to_uint32_t(char *bytestr)
+bytestr_to_uint32_t(uint8_t *bytestr)
 {
 	/* Little Endian Case */
 	//uint32_t myInt1 = (uint32_t)bytestr[0] + ((uint32_t)bytestr[1] << 8) + ((uint32_t)bytestr[2] << 16) + ((uint32_t)bytestr[3] << 24);
 	/* Big Endian Case */
-	uint32_t myInt1 = ((uint32_t)bytestr[0] << 24) + ((uint32_t)bytestr[1] << 16) + ((uint32_t)bytestr[2] << 8) + (uint32_t)bytestr[3];
+	uint32_t myInt1 = ((uint32_t)bytestr[0] << 24) +
+	                  ((uint32_t)bytestr[1] << 16) +
+	                  ((uint32_t)bytestr[2] << 8) +
+	                  (uint32_t)bytestr[3];
 	return myInt1;
 }
 
@@ -548,10 +547,17 @@ bytestr_to_uint32_t(char *bytestr)
  *-------------------------------------------------------------------------
  */
 static uint64_t
-bytestr_to_uint64_t(char *bytestr)
+bytestr_to_uint64_t(uint8_t *bytestr)
 {
 	/* Big Endian Case */
-	uint64_t myInt1 = ((uint64_t)bytestr[0] << 56) + ((uint64_t)bytestr[1] << 48) + ((uint64_t)bytestr[2] << 40) + ((uint64_t)bytestr[3] << 32) +  ((uint64_t)bytestr[4] << 24) + ((uint64_t)bytestr[5] << 16) + ((uint64_t)bytestr[6] << 8) + (uint64_t)bytestr[7];
+	uint64_t myInt1 = ((uint64_t)(bytestr[0]) << 56) +
+	                  ((uint64_t)(bytestr[1]) << 48) +
+	                  ((uint64_t)(bytestr[2]) << 40) +
+	                  ((uint64_t)(bytestr[3]) << 32) +
+	                  ((uint64_t)(bytestr[4]) << 24) +
+	                  ((uint64_t)(bytestr[5]) << 16) +
+	                  ((uint64_t)(bytestr[6]) << 8) +
+	                  (uint64_t)(bytestr[7]);
 	return myInt1;
 }
 
@@ -577,7 +583,7 @@ get_uint32_t(H5VL_cdf_t* file, off_t *rdoff)
 #ifdef ENABLE_CDF_VERBOSE
 	printf(" bytes: %d %d %d %d\n", (uint8_t)bytestr[0], (uint8_t)bytestr[1], (uint8_t)bytestr[2], (uint8_t)bytestr[3]);
 #endif
-	return (uint64_t)bytestr_to_uint32_t( bytestr );
+	return (uint64_t)bytestr_to_uint32_t( (uint8_t *)bytestr );
 }
 
 /*-------------------------------------------------------------------------
@@ -599,7 +605,7 @@ get_uint64_t(H5VL_cdf_t* file, off_t *rdoff)
 		pread(file->fd, &bytestr[0], 8, *rdoff);
 #endif
 	*rdoff = *rdoff + 8;
-	return bytestr_to_uint64_t( bytestr );
+	return bytestr_to_uint64_t( (uint8_t *)bytestr );
 }
 
 /*-------------------------------------------------------------------------
@@ -1357,6 +1363,22 @@ H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
 			cdf_handle_error( "Failed to read CDF header on rank 0.", __LINE__ );
 		}
 
+#ifdef ENABLE_CDF_VERBOSE
+#ifdef H5_VOL_HAVE_PARALLEL
+		MPI_Barrier(MPI_COMM_WORLD);
+		if (file->rank == 0) {
+#endif
+			printf("----\n");
+			printf("====\n");
+			printf("#### Header is parsed.\n");
+			printf("====\n");
+			printf("----\n");
+#ifdef H5_VOL_HAVE_PARALLEL
+		}
+		MPI_Barrier(MPI_COMM_WORLD);
+#endif
+#endif
+
 		return (void *)file;
 } /* end H5VL_cdf_file_open() */
 
@@ -1545,16 +1567,15 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	char *charbuf = (char *)buf; /* Cast buffer to character for byte arithmetic */
 	size_t dataTypeSize;
 	H5S_sel_type memSelType, h5selType; /* Selection types in memory and file */
-	hsize_t npoints, nblocks_file, nblocks_mem;
+	hsize_t npoints, npoints_mem, nblocks_file, nblocks_mem;
 	hsize_t *blockinfo_file;
-	//hsize_t *blockinfo_mem;
 	herr_t h5_status;
 	int ndims, i, n;
 	H5_posMap *sourceSelOrderInC = NULL;
 	H5_posMap *targetSelOrderInC = NULL;
 #ifdef H5_VOL_HAVE_PARALLEL
 	MPI_Status mpi_status;
-	MPI_Datatype indexedtype;
+	MPI_Datatype structtype;
 #endif
 
 #ifdef ENABLE_CDF_VERBOSE
@@ -1580,7 +1601,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	if (h5selType == H5S_SEL_ALL) {
 
 #ifdef ENABLE_CDF_VERBOSE
-		printf("[%d] <%s> Reading %llu values for file offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
+		printf("[%d] <%s> Reading %llu values for file offset %llu\n", file->rank, var->name->string, var->vsize, var->offset);
 		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
 #ifdef H5_VOL_HAVE_PARALLEL
@@ -1599,7 +1620,6 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	} else if (h5selType == H5S_SEL_HYPERSLABS) {
 		printf("WARNING!!! H5S_SEL_HYPERSLABS is still experimental.\n");
 
-
 		/* Generate arrays of flattened positions for each point in the selection.
 		 * The H5_posMap type will have an index (posCompact), and a position in
 		 * file or memory space (posInSource).  The position is the element index
@@ -1607,16 +1627,15 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		 */
 		GetSelOrder(file_space_id, h5selType, &sourceSelOrderInC);
 		GetSelOrder(mem_space_id, memSelType, &targetSelOrderInC);
+		npoints = H5Sget_select_npoints(file_space_id);
+		npoints_mem = H5Sget_select_npoints(mem_space_id);
 #ifdef ENABLE_CDF_VERBOSE
-		for (i=0; i<1; i++) {
-			printf("[%d] <%s> sourceSelOrderInC[%d].posCompact = %llu\n",file->rank,var->name->string,i,sourceSelOrderInC[i].posCompact);
-			printf("[%d] <%s> sourceSelOrderInC[%d].posInSource = %llu\n",file->rank,var->name->string,i,sourceSelOrderInC[i].posInSource);
-			printf("[%d] <%s> targetSelOrderInC[%d].posCompact = %llu\n",file->rank,var->name->string,i,targetSelOrderInC[i].posCompact);
-			printf("[%d] <%s> targetSelOrderInC[%d].posInSource = %llu\n",file->rank,var->name->string,i,targetSelOrderInC[i].posInSource);
-		}
+		//for (i=0; i<npoints_mem; i++) {
+			//printf("[%d] <%s> SOURCE[%d] posInSource = %llu (posCompact = %llu)\n",file->rank,var->name->string,i,sourceSelOrderInC[i].posInSource,sourceSelOrderInC[i].posCompact);
+			//printf("[%d] <%s> TARGET[%d] posInSource = %llu (posCompact = %llu)\n",file->rank,var->name->string,i,targetSelOrderInC[i].posInSource,targetSelOrderInC[i].posCompact);
+		//}
 #endif
 
-		npoints = H5Sget_select_npoints(file_space_id);
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> Hyperslab selection has %llu points.\n", file->rank, var->name->string, npoints);
 		printf("[%d] <%s> Variable size is %llu.\n", file->rank, var->name->string, var->vsize);
@@ -1657,61 +1676,85 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 
 			/* Calculate the maximum number of contiguous chunks, and the chunk size */
 			uint64_t max_chunks = nblocks_file;
-			uint64_t chunk_len = 0;
+			uint64_t chunk_len_s = 0;
 			for (i = ndims-1; i >= 0; i--) {
 				if (i < ndims-1) {
 					max_chunks *= (blockinfo_file[0 + ndims + i] - blockinfo_file[0 + i] + 1);
 				} else {
-					chunk_len = (blockinfo_file[0 + ndims + i] - blockinfo_file[0 + i] + 1);
+					chunk_len_s = (blockinfo_file[0 + ndims + i] - blockinfo_file[0 + i] + 1);
 				}
 			}
-#ifdef ENABLE_CDF_VERBOSE
-			printf("[%d] <%s> max_chunks = %llu\n", file->rank, var->name->string, max_chunks);
-			printf("[%d] <%s> blockSize = %llu\n", file->rank, var->name->string, max_chunks*chunk_len);
-#endif
 
 			/* Allocate arrays to store the offset of each chunk
 			 * (Assume the selection will result in all chunks being the same length,
 			 * with the magnitude being the size in the 0th dimension)
 			 */
-			int *chunk_off = (int *) malloc (sizeof(int) * max_chunks);
+#ifdef H5_VOL_HAVE_PARALLEL
+			MPI_Aint *chunk_off = (MPI_Aint *) malloc (sizeof(MPI_Aint) * max_chunks);
+			MPI_Datatype *chunk_typ = (MPI_Datatype *) malloc (sizeof(MPI_Datatype) * max_chunks);
+#else
+			off_t *chunk_off = (off_t *) malloc (sizeof(off_t) * max_chunks);
+#endif
+			int *chunk_len = (int *) malloc (sizeof(int) * max_chunks);
 
 			/* Populate chunk_off */
 			int last_ind = sourceSelOrderInC[0].posInSource;
-			int chunk_ind = 0;
+			int chunk_ind = 0;  /* number of contiguous chunks (current index) */
+			int chunk_cnt = 1;  /* num elements in current chunk */
 			chunk_off[chunk_ind] = last_ind * (var->nc_type_size);
+			chunk_len[chunk_ind] = npoints * (var->nc_type_size);
+#ifdef H5_VOL_HAVE_PARALLEL
+			chunk_typ[chunk_ind] = MPI_BYTE;
+#endif
 			for (i = 1; i<npoints; i++) {
 				int this_ind = sourceSelOrderInC[i].posInSource;
 				if (this_ind != (last_ind+1)) {
-					chunk_off[chunk_ind] = this_ind * (var->nc_type_size);
+					chunk_len[chunk_ind] = chunk_cnt * (var->nc_type_size);
 					chunk_ind++;
+					chunk_off[chunk_ind] = this_ind * (var->nc_type_size);
+					chunk_len[chunk_ind] = (npoints - i) * (var->nc_type_size);
+#ifdef H5_VOL_HAVE_PARALLEL
+					chunk_typ[chunk_ind] = MPI_BYTE;
+#endif
+					chunk_cnt = 0;
 				}
+				chunk_cnt++;
 				last_ind = this_ind;
 			}
 			max_chunks = (chunk_ind+1);
-			printf("[%d] <%s> REAL max_chunks = %llu (offset[0] = %d)\n", file->rank, var->name->string, max_chunks, chunk_off[0]);
+			printf("[%d] <%s> REAL max_chunks = %llu (offset[0] = %lld)\n", file->rank, var->name->string, max_chunks, chunk_off[0]);
 
 #ifdef H5_VOL_HAVE_PARALLEL
-			MPI_Type_create_indexed_block( (int)max_chunks, (int)chunk_len, chunk_off, MPI_BYTE, &indexedtype );
-			MPI_Type_commit( &indexedtype );
-			MPI_File_set_view( file->fh, var->offset, MPI_BYTE, indexedtype, "native", MPI_INFO_NULL );
+			MPI_Type_create_struct( (int)max_chunks, chunk_len, chunk_off, chunk_typ, &structtype );
+			MPI_Type_commit( &structtype );
+			MPI_File_set_view( file->fh, var->offset, MPI_BYTE, structtype, "native", MPI_INFO_NULL );
 			MPI_File_read( file->fh, output_data, (npoints * var->nc_type_size), MPI_BYTE, &mpi_status );
+			MPI_Type_free(&structtype);
+#else
+			/* POSIX-based read (Just read one chunk at a time) */
+			uint64_t mem_ind = 0;
+			for (i = 0; i<max_chunks; i++) {
+				off_t total_offset = ((off_t)var->offset) + chunk_off[i];
+				pread(file->fd, &output_data[mem_ind], chunk_len[i], total_offset);
+				mem_ind += chunk_len[i];
+			}
+#endif
 			/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
 			for (i=0; i<(npoints * var->nc_type_size); i+=var->nc_type_size){
 				bytestr_rev(&output_data[i],var->nc_type_size);
 			}
-			MPI_Type_free(&indexedtype);
-#else
-			/* Need POSIX-based read */
-#endif
 
 			/* Assign data to proper memory-space selection */
 			assignToMemSpace(sourceSelOrderInC, targetSelOrderInC, npoints, var->nc_type_size, output_data, charbuf);
+			//DEBUG (direct copy): memcpy(charbuf, output_data, (npoints * var->nc_type_size));
 
+			free(chunk_len);
 			free(chunk_off);
+#ifdef H5_VOL_HAVE_PARALLEL
+			free(chunk_typ);
+#endif
 			free(output_data);
 			free(blockinfo_file);
-			//free(blockinfo_mem);
 		}
 		free(sourceSelOrderInC);
 		free(targetSelOrderInC);
