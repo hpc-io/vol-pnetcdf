@@ -111,6 +111,7 @@ typedef struct cdf_var_t {
 
 /* The CDF VOL info object */
 typedef struct H5VL_cdf_t {
+	char *fname; /* Store the file name */
 	uint8_t fmt; /* CDF File Spec (1,2,5) */
 	cdf_non_neg_t numrecs; /* length of record dimension */
 	cdf_non_neg_t ndims; /* number of dimensions */
@@ -131,6 +132,15 @@ typedef struct H5VL_cdf_t {
 	int fd; /* posix file object */
 #endif
 } H5VL_cdf_t;
+
+/* VOL Info Object */
+typedef struct H5VL_cdf_info_t {
+	hid_t vol_id; /* VOL ID */
+} H5VL_cdf_info_t;
+
+/* Keep track of open files */
+int n_file_objects_open = 0;
+H5VL_cdf_t *file_objects_open[MAX_FILES_OPEN];
 
 /********************* */
 /* Function prototypes */
@@ -183,6 +193,8 @@ static void *H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
 static herr_t H5VL_cdf_file_close(void *file, hid_t dxpl_id, void **req);
 
 /* Group callbacks */
+static void *H5VL_cdf_group_open(void *obj, const H5VL_loc_params_t *loc_params, const char *varName, hid_t gapl_id, hid_t dxpl_id, void **req);
+static herr_t H5VL_cdf_group_get(void *obj, H5VL_group_get_t get_type, hid_t dxpl_id, void **req, va_list arguments);
 
 /* Link callbacks */
 
@@ -250,8 +262,8 @@ const H5VL_class_t H5VL_cdf_g = {
     },
     {                                           /* group_cls */
         NULL, //H5VL_cdf_group_create,                      /* create */
-        NULL, //H5VL_cdf_group_open,                        /* open */
-        NULL, //H5VL_cdf_group_get,                         /* get */
+        H5VL_cdf_group_open,                        /* open */
+        H5VL_cdf_group_get,                         /* get */
         NULL, //H5VL_cdf_group_specific,                    /* specific */
         NULL, //H5VL_cdf_group_optional,                    /* optional */
         NULL, //H5VL_cdf_group_close                        /* close */
@@ -1229,6 +1241,9 @@ H5VL_cdf_free_obj(H5VL_cdf_t *obj)
 	}
 #endif
 
+	/* Free file name */
+	free(obj->fname);
+
 	/* Free vol object */
 	free(obj);
 
@@ -1359,7 +1374,6 @@ static void *
 H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
     hid_t dxpl_id, void **req)
 {
-		H5VL_cdf_info_t *info;
 		H5VL_cdf_t *file;
 		int err;
 
@@ -1406,6 +1420,12 @@ H5VL_cdf_file_open(const char *name, unsigned flags, hid_t fapl_id,
 #endif
 #endif
 
+		/* Store this open file in a list of pointers */
+		file->fname = (char *) malloc(strlen(name) * sizeof(char));
+		strcpy(file->fname, name);
+		file_objects_open[n_file_objects_open] = file;
+		n_file_objects_open++;
+
 		return (void *)file;
 } /* end H5VL_cdf_file_open() */
 
@@ -1441,6 +1461,86 @@ H5VL_cdf_file_close(void *file, hid_t dxpl_id, void **req)
 
     return ret_value;
 } /* end H5VL_cdf_file_close() */
+
+
+
+
+
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+static void *
+H5VL_cdf_group_open(void *obj, const H5VL_loc_params_t *loc_params, const char *varName,
+                    hid_t gapl_id, hid_t dxpl_id, void **req) {
+	H5VL_cdf_t *file;
+	cdf_var_t *var;
+	if (H5I_GROUP == loc_params->obj_type) {
+		printf("H5VL_cdf_group_open with: H5I_GROUP\n");
+		var = (cdf_var_t *) obj;
+	} else if (H5I_FILE == loc_params->obj_type) {
+		printf("H5VL_cdf_group_open with: H5I_FILE\n");
+		file = (H5VL_cdf_t *) obj;
+	}
+	/*
+	if ((varName != NULL) && (1 == strlen(varName)) && ('/' == varName[0])) { // h5ls request
+		cdf_var_t *dummy = (cdf_var_t *)calloc(1, sizeof(cdf_var_t));
+		//dummy->name = NULL;
+		return dummy;
+	}
+	cdf_var_t *var = (H5VL_adios_var_t *)SAFE_CALLOC(1, sizeof(H5VL_adios_var_t));
+	var->name = (char *)SAFE_CALLOC(strlen(varName) + 1, sizeof(char));
+	sprintf(var->name, "%s", varName);
+	var->fileReader = bpFile;
+	var->dimInfo = (H5VL_adios_dim_t *)SAFE_CALLOC(1, sizeof(H5VL_adios_dim_t));
+	struct adios_index_comp_struct_v1 *varInAdios = adios_get_var_byname(var->fileReader, varName);
+	var->ntimestep = adios_get_var_nsteps(varInAdios);
+	*/
+	return var;
+}
+
+static herr_t
+H5VL_cdf_group_get(void *obj, H5VL_group_get_t get_type, hid_t dxpl_id,
+                     void **req, va_list arguments) {
+	herr_t ret_value = 0; /* Return value */
+	switch (get_type) {
+	case H5VL_GROUP_GET_INFO: {
+		H5VL_cdf_t *file = (H5VL_cdf_t *)obj;
+		H5VL_loc_params_t loc_params = va_arg(arguments, H5VL_loc_params_t);
+		va_arg(arguments, H5G_info_t*); /* NOT SURE WHY THIS IS NEEDED TO WORK? */
+		H5G_info_t *grp_info = va_arg(arguments, H5G_info_t*);
+		if (loc_params.type == H5VL_OBJECT_BY_SELF) { /* H5Gget_info */
+			//printf("(B) Inside H5VL_cdf_group_get -- grp_info->nlinks=%llu\n",grp_info->nlinks);
+			grp_info->nlinks = (hsize_t)(file->nvars);
+			//printf("(C) Inside H5VL_cdf_group_get -- grp_info->nlinks=%llu\n",grp_info->nlinks);
+		}
+		break;
+
+// /* Information struct for group (for H5Gget_info/H5Gget_info_by_name/H5Gget_info_by_idx) */
+// typedef struct H5G_info_t {
+//     H5G_storage_type_t  storage_type;   /* Type of storage for links in group */
+//     hsize_t     nlinks;                 /* Number of links in group */
+//     int64_t     max_corder;             /* Current max. creation order value for group */
+//     hbool_t     mounted;                /* Whether group has a file mounted on it */
+// } H5G_info_t;
+
+	}
+	default:
+		printf("ERROR: cdf_group_get() only supports get info\n");
+		ret_value = -1;
+	}
+	return ret_value;
+}
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ */
+
+
+
+
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_attr_open
@@ -1885,5 +1985,145 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	}
 
 
+	return ret_value;
+}
+
+/*-------------------------------------------------------------------------
+ * Function:    cdf_vol_var_get_attname
+ *
+ * Purpose      Populates "attname" with attribute name at specified
+ *              index (iatts)
+ *
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *-------------------------------------------------------------------------
+ */
+herr_t
+cdf_vol_var_get_attname(const char *file_name, const char *var_name, char *att_name, int iatts) {
+	herr_t ret_value=-1;
+	int i,j;
+	for (i=0; i<n_file_objects_open; i++) {
+		H5VL_cdf_t *obj = file_objects_open[i];
+		if ( !strcmp( obj->fname, file_name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+			printf("[%d] <%s> <%s> FILE MATCH!\n",obj->rank, obj->fname, file_name);
+#endif
+			for (j=0; j<obj->nvars; j++) {
+				cdf_var_t *var = &(obj->vars[j]);
+				if ( !strcmp( var->name->string, var_name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+					printf("[%d] <%s> <%s> VAR MATCH!\n",obj->rank, var->name->string, var_name);
+#endif
+					cdf_att_t attr = var->atts[iatts];
+					char *name = attr.name->string;
+					strcpy(att_name, name);
+					ret_value = 0;
+					break;
+				}
+			}
+			break;
+		}
+	}
+	return ret_value;
+}
+
+/*-------------------------------------------------------------------------
+ * Function:    cdf_vol_var_get_natts
+ *
+ * Purpose      Populates "natts" with number of attributes.
+ *
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *-------------------------------------------------------------------------
+ */
+herr_t
+cdf_vol_var_get_natts(const char *file_name, const char *var_name, int *natts) {
+	herr_t ret_value=-1;
+	int i,j;
+	for (i=0; i<n_file_objects_open; i++) {
+		H5VL_cdf_t *obj = file_objects_open[i];
+		if ( !strcmp( obj->fname, file_name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+			printf("[%d] <%s> <%s> FILE MATCH!\n",obj->rank, obj->fname, file_name);
+#endif
+			for (j=0; j<obj->nvars; j++) {
+				cdf_var_t *var = &(obj->vars[j]);
+				if ( !strcmp( var->name->string, var_name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+					printf("[%d] <%s> <%s> VAR MATCH! (var->natts: %llu)\n",obj->rank, var->name->string, var_name, var->natts);
+#endif
+					*natts = var->natts;
+					ret_value = 0;
+					break;
+				}
+			}
+			break;
+		}
+	}
+	return ret_value;
+}
+
+ /*-------------------------------------------------------------------------
+  * Function:    cdf_vol_file_get_iname
+  *
+  * Purpose      Populates "iname" with name of variable or attribute at given
+	*              index ("item").
+  *
+  * Return:      Success:    Non-negative
+  *              Failure:    Negative
+  *-------------------------------------------------------------------------
+  */
+herr_t
+cdf_vol_file_get_iname(const char *file_name, char *iname, int item, cdf_vol_get_t type) {
+	herr_t ret_value=-1;
+	char *name;
+	int i,j;
+	for (i=0; i<n_file_objects_open; i++) {
+		H5VL_cdf_t *obj = file_objects_open[i];
+		if ( !strcmp( obj->fname, file_name) ) {
+			if (type == CDF_VOL_VAR) {
+				cdf_var_t var =  obj->vars[item];
+				name = var.name->string;
+			} else {
+				cdf_att_t attr =  obj->atts[item];
+				name = attr.name->string;
+			}
+			//iname = (char *) malloc( strlen(name) * sizeof(char) );
+			strcpy(iname, name);
+			ret_value = 0;
+			break;
+		}
+	}
+	return ret_value;
+}
+
+/*-------------------------------------------------------------------------
+ * Function:    cdf_vol_file_get_nitems
+ *
+ * Purpose      Populates "nitems" with number of variables of attributes,
+ *              depending on "type" parameter.
+ *
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *-------------------------------------------------------------------------
+ */
+herr_t
+cdf_vol_file_get_nitems(const char *file_name, int *nitems, cdf_vol_get_t type) {
+	herr_t ret_value=-1;
+	int i,j;
+	for (i=0; i<n_file_objects_open; i++) {
+		H5VL_cdf_t *obj = file_objects_open[i];
+		if ( !strcmp( obj->fname, file_name) ) {
+#ifdef ENABLE_CDF_VERBOSE
+			printf("[%d] <%s> <%s> NAME MATCH!\n",obj->rank, obj->fname, file_name);
+#endif
+			if (type == CDF_VOL_VAR)
+				*nitems = obj->nvars;
+			else
+				*nitems = obj->natts;
+			ret_value = 0;
+			break;
+		}
+	}
 	return ret_value;
 }

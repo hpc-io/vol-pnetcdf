@@ -323,11 +323,52 @@ int main(int argc, char **argv) {
 	free(data_out);
 	free(dims_out);
 
+	/* Get list of attributes */
+	H5G_info_t *ginfo = (H5G_info_t *) calloc( 1, sizeof(H5G_info_t) );
+	ginfo->nlinks = 17;
+	//printf("(A) Object count = %llu\n", ginfo->nlinks);
+	status = H5Gget_info(file_id, ginfo);
+	//printf("(D) Object count = %llu (status = %d)\n", ginfo->nlinks, status);
+	free(ginfo);
+
+
+	/* Get count and names of variables and attributes in file */
+	int nvars_check=0;
+	int natts_check=0;
+	cdf_vol_file_get_nitems(FILE, &nvars_check, CDF_VOL_VAR);
+	cdf_vol_file_get_nitems(FILE, &natts_check, CDF_VOL_ATT);
+	if(rank==0) {
+		printf(" FILE: Num variables: %d -- Num attributes: %d\n", nvars_check, natts_check);
+	}
+	char varname[nvars_check][1024];
+	char attname[natts_check][1024];
+	for (i=0; i<nvars_check; i++) {
+		cdf_vol_file_get_iname(FILE, varname[i], i, CDF_VOL_VAR);
+		if(rank==0) printf("var[%d]: %s\n", i, varname[i]);
+	}
+	for (i=0; i<natts_check; i++) {
+		cdf_vol_file_get_iname(FILE, attname[i], i, CDF_VOL_ATT);
+		if(rank==0) printf("att[%d]: %s\n", i, attname[i]);
+	}
+
+	/* Also want the attributes attached to each variable */
+	int var_id = 1; /* Know there is an attribute on index 1... */
+	int natts_var_check=0;
+	cdf_vol_var_get_natts(FILE, varname[var_id], &natts_var_check);
+	if(rank==0) {
+		printf(" var[%d] - Num attributes: %d\n", var_id, natts_var_check);
+	}
+	char var_attname[natts_var_check][1024];
+	for (i=0; i<natts_var_check; i++) {
+		cdf_vol_var_get_attname(FILE, varname[var_id], var_attname[i], i);
+		if(rank==0) printf("var att[%d]: %s\n", i, var_attname[i]);
+	}
+
 	/* Read Attribute */
 	hid_t attr1, attr2;
 	char attr_data[13];
 	char var_attr_data[13];
-	attr1 = H5Aopen_name (file_id, "string");
+	attr1 = H5Aopen_name (file_id, attname[0]);
 	H5Aread(attr1, H5T_NATIVE_CHAR, attr_data);
 	attr2 = H5Aopen_name (int_dataset_id, "varstring");
 	H5Aread(attr2, H5T_NATIVE_CHAR, var_attr_data);
