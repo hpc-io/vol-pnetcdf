@@ -20,7 +20,7 @@
 
 #define NDIMS          3
 #define DIMLEN         8
-#define NUM_VARS      10
+#define NUM_VARS      3
 
 static void handle_error(int status, int lineno)
 {
@@ -68,11 +68,11 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len) {
 		psizes[i] = 0;
 
 	MPI_Dims_create(nprocs, NDIMS, psizes);
-	starts[0] = rank % psizes[0];
-	starts[1] = (rank / psizes[1]) % psizes[1];
-	starts[2] = (rank / (psizes[0] * psizes[1])) % psizes[2];
+	starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
+	starts[1] = (rank / psizes[2]) % psizes[1];
+	starts[2] = rank % psizes[2];
 	//printf("[%d] starts = %llu %llu %llu\n", rank, starts[0], starts[1], starts[2]);
-	//printf("[%d] psizes = %d %d %d\n", rank, psizes[0], psizes[1], psizes[2]);
+	//if (rank==0) printf("[%d] psizes = %d %d %d\n", rank, psizes[0], psizes[1], psizes[2]);
 
 	bufsize = 1;
 	for (i=0; i<NDIMS; i++) {
@@ -93,6 +93,7 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len) {
 
 	/* create the file */
 	cmode |= NC_CLOBBER;
+	cmode |= NC_64BIT_DATA;
 	err = ncmpi_create(comm, filename, cmode, MPI_INFO_NULL, &ncid);
 	if (err != NC_NOERR) {
 		printf("Error at %s:%d ncmpi_create() file %s (%s)\n", __FILE__,__LINE__,filename,ncmpi_strerror(err));
@@ -185,6 +186,7 @@ int main(int argc, char **argv) {
 	long read_size_all=1.0, read_size_hyper=1.0;
 	long sum_read_size_all=1.0, sum_read_size_hyper=1.0;
 	double size_rpt;
+	int skip_read_all=1;
 
 	/* Parse Inpu Args */
 	for (i=1;i<argc;i++) {
@@ -194,6 +196,8 @@ int main(int argc, char **argv) {
 			i++; cmode = atoi(argv[i]);
 		} else if (strcmp(argv[i],"--col") == 0) {
 			use_collective = 1;
+		} else if (strcmp(argv[i],"--all") == 0) {
+			skip_read_all = 0; /* Try an additional SELCT_ALL read */
 		} else {
 			printf("ERROR - unrecognized parameter: %s.  Exitting.\n",argv[i]);
 			exit(-1);
@@ -227,22 +231,26 @@ int main(int argc, char **argv) {
 	else
 		H5Pset_dxpl_mpio(dxpl_plist_id, H5FD_MPIO_INDEPENDENT);
 
-	/* Read 3D integer dataset (H5S_ALL) */
-	int_dataset_id = H5Dopen(file_id, "var0", H5P_DEFAULT);
-	bytecnt = H5Dget_storage_size(int_dataset_id);
-	dset_data_int = (int *) malloc( bytecnt );
-	read_time_all = MPI_Wtime();
-	status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_int);
-	read_time_all = MPI_Wtime() - read_time_all;
-	read_size_all = bytecnt;
-	MPI_Reduce(&read_size_all, &sum_read_size_all, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
-	MPI_Reduce(&read_time_all, &max_read_time_all, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-	//printf("[%d] data_out size = %llu integers.\n", rank, bytecnt/sizeof(int) );
-	//for (i=0; i<dlen*NDIMS; i++) {
-	//	printf("[%d] dset_data_int[%d] = %d\n", rank, i, dset_data_int[i]);
-	//}
-	H5Dclose(int_dataset_id);
-	free(dset_data_int);
+	if (skip_read_all==0) {
+
+		/* Read 3D integer dataset (H5S_ALL) */
+		int_dataset_id = H5Dopen(file_id, "var0", H5P_DEFAULT);
+		bytecnt = H5Dget_storage_size(int_dataset_id);
+		dset_data_int = (int *) malloc( bytecnt );
+		read_time_all = MPI_Wtime();
+		status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_int);
+		read_time_all = MPI_Wtime() - read_time_all;
+		read_size_all = bytecnt;
+		MPI_Reduce(&read_size_all, &sum_read_size_all, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+		MPI_Reduce(&read_time_all, &max_read_time_all, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+		//printf("[%d] data_out size = %llu integers.\n", rank, bytecnt/sizeof(int) );
+		//for (i=0; i<dlen*NDIMS; i++) {
+		//	printf("[%d] dset_data_int[%d] = %d\n", rank, i, dset_data_int[i]);
+		//}
+		H5Dclose(int_dataset_id);
+		free(dset_data_int);
+
+	}
 
 	/* Read simple hyperslab selection from var1 */
 	int_dataset_id = H5Dopen(file_id, "var1", H5P_DEFAULT);
@@ -257,9 +265,9 @@ int main(int argc, char **argv) {
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
 	MPI_Dims_create(nprocs, NDIMS, psizes);
-	starts[0] = rank % psizes[0];
-	starts[1] = (rank / psizes[1]) % psizes[1];
-	starts[2] = (rank / (psizes[0] * psizes[1])) % psizes[2];
+	starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
+	starts[1] = (rank / psizes[2]) % psizes[1];
+	starts[2] = rank % psizes[2];
 	//printf("[%d] starts = %llu %llu %llu\n", rank, starts[0], starts[1], starts[2]);
 	//printf("[%d] psizes = %d %d %d\n", rank, psizes[0], psizes[1], psizes[2]);
 
@@ -292,7 +300,7 @@ int main(int argc, char **argv) {
 	hsize_t     block_out[NDIMS];
 	hsize_t     count_out[NDIMS];              /* size of the hyperslab in the file */
 	hsize_t     offset_out[NDIMS];             /* hyperslab offset in the file */
-	int hypersize=1;
+	int64_t     hypersize=1;
 	for (i=0; i<NDIMS; i++) {
 		block_out[i] = block[i];
 		stride_out[i] = block[i];
@@ -317,7 +325,9 @@ int main(int argc, char **argv) {
 	for (i=0; i<hypersize; i++) {
 		if (data_out[i] != ((rank+1)*10)) {
 			printf("ERROR!!! ~~~ [%d] data_out[%d] = %d\n", rank, i, data_out[i]);
+			//break;
 		}
+		//printf("VERBOSE --> [%d] data_out[%d] = %d\n", rank, i, data_out[i]);
 	}
 	free(dset_data_int);
 	free(data_out);
@@ -361,7 +371,7 @@ int main(int argc, char **argv) {
 	char var_attname[natts_var_check][1024];
 	for (i=0; i<natts_var_check; i++) {
 		cdf_vol_var_get_attname(FILE, varname[var_id], var_attname[i], i);
-		if(rank==0) printf("var att[%d]: %s\n", i, var_attname[i]);
+		if(rank==0) printf(" var att[%d]: %s\n", i, var_attname[i]);
 	}
 
 	/* Read Attribute */
@@ -370,22 +380,23 @@ int main(int argc, char **argv) {
 	char var_attr_data[13];
 	attr1 = H5Aopen_name (file_id, attname[0]);
 	H5Aread(attr1, H5T_NATIVE_CHAR, attr_data);
-	attr2 = H5Aopen_name (int_dataset_id, "varstring");
+	attr2 = H5Aopen_name (int_dataset_id, var_attname[0]);
 	H5Aread(attr2, H5T_NATIVE_CHAR, var_attr_data);
-	H5Dclose(int_dataset_id);
 
 	/* Summarize the results */
 	if (rank == 0) {
-		printf(" File Attribute = %s", attr_data);
-		printf(" Variable Attribute = %s", var_attr_data);
-		printf(" FILE_OPEN:   time[s]=%f\n", max_open_time);
+		printf("\n  File Attribute = %s", attr_data);
+		printf("  Variable Attribute = %s", var_attr_data);
+		printf("\n  FILE_OPEN:   time[s]=%f\n", max_open_time);
 		size_rpt = ((double)sum_read_size_all) / 1048576.0;
-		printf(" READ_ALL:    size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n", size_rpt, max_read_time_all, size_rpt/max_read_time_all);
+		if (skip_read_all==0)
+			printf("  READ_ALL:    size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n", size_rpt, max_read_time_all, size_rpt/max_read_time_all);
 		size_rpt = ((double)sum_read_size_hyper) / 1048576.0;
-		printf(" READ_HYPER:  size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n\n", size_rpt, max_read_time_hyper, size_rpt/max_read_time_hyper);
+		printf("  READ_HYPER:  size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n\n", size_rpt, max_read_time_hyper, size_rpt/max_read_time_hyper);
 	}
 
 	/* Close File etc */
+	H5Dclose(int_dataset_id);
 	H5Aclose(attr1);
 	H5Aclose(attr2);
 	H5Fclose(file_id);

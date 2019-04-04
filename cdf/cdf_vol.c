@@ -434,8 +434,8 @@ GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result) {
 
 	i = 0; n = 0;
 	for (n = 0; n < nblocks; n++) {
-		uint64_t blockSize = 1;
-		uint64_t h_start[ndim], h_count[ndim];
+		hsize_t blockSize = 1;
+		hsize_t h_start[ndim], h_count[ndim];
 		for (i = 0; i < ndim; i++) {
 			int pos = 2 * ndim * n;
 			h_start[i] = blockinfo[pos + i];
