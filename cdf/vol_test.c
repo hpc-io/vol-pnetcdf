@@ -4,6 +4,7 @@
 #include <assert.h>
 #include "hdf5.h"
 #include "cdf_vol.h"
+//#define FILE "/Users/rzamora/remote-fs/testfile.nc"
 #define FILE "testfile.nc"
 #include <pnetcdf.h>
 
@@ -52,7 +53,7 @@ static void print_info(MPI_Info *info_used)
 }
 
 /* Use pNetCDF to write NDIMS-dimensional datasets to a test file */
-int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, float fmult, int pinfo) {
+int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, int pinfo) {
 
 	char str[512];
 	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
@@ -216,7 +217,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	/* allocate buffer and initialize */
 	for (i=0; i<NUM_VARS; i++) {
 		buf[i] = (int *) malloc(bufsize * sizeof(int));
-		for (j=0; j<bufsize; j++) buf[i][j] = -1.0;
+		for (j=0; j<bufsize; j++) buf[i][j] = -1;
 	}
 
 	MPI_Barrier(comm);
@@ -271,7 +272,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 }
 
 /* Use HDF5 CDF VOL Connector to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, float fmult, int read_all) {
+int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all) {
 
 	hid_t file_id, int_dataset_id, dbl_dataset_id, dataspace_id, dxpl_plist_id;  /* identifiers */
 	hsize_t dims[2];
@@ -282,6 +283,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, flo
 	hid_t vol_id;
 	char name[25];
 	hsize_t bytecnt;
+	int *data_out[NUM_VARS];
 	int *dset_data_int;
 	double *dset_data_dbl;
 	int nprocs, rank, i, j, err, nerrs=0;
@@ -290,6 +292,22 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, flo
 	long read_size_all=1.0, read_size_hyper=1.0;
 	long sum_read_size_all=1.0, sum_read_size_hyper=1.0;
 	double size_rpt;
+	hsize_t stride_out[NDIMS], block_out[NDIMS];
+	hsize_t count_out[NDIMS];              /* size of the hyperslab in the file */
+	hsize_t offset_out[NDIMS];             /* hyperslab offset in the file */
+	int64_t hypersize=1;
+	hsize_t stride[NDIMS], block[NDIMS];
+	hsize_t count[NDIMS];              /* size of the hyperslab in the file */
+	hsize_t offset[NDIMS];             /* hyperslab offset in the file */
+	hid_t dataspace; /* dataspace handle */
+	int dimrank;
+	hsize_t *dims_out;
+	int status_n;
+	int psizes[NDIMS];
+	MPI_Offset starts[NDIMS];
+	herr_t status_h5;
+	hsize_t dimsm[NDIMS];
+	hid_t memspace;
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -304,7 +322,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, flo
 	H5Pset_fapl_mpio(acc_tpl, comm, MPI_INFO_NULL);
 	H5Pset_vol(acc_tpl, vol_id, &fapl);
 	open_time = MPI_Wtime();
-	file_id = H5Fopen(FILE, H5F_ACC_RDWR, acc_tpl);
+	file_id = H5Fopen(filename, H5F_ACC_RDWR, acc_tpl);
 	open_time = MPI_Wtime()-open_time;
 	MPI_Reduce(&open_time, &max_open_time, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
 
@@ -332,13 +350,10 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, flo
 
 	/* Read simple hyperslab selection from var1 */
 	int_dataset_id = H5Dopen(file_id, "var0", H5P_DEFAULT);
-	dset_data_int = (int *) malloc( H5Dget_storage_size(int_dataset_id) );
-	hid_t dataspace = H5Dget_space (int_dataset_id);    /* dataspace handle */
-	int dimrank      = H5Sget_simple_extent_ndims (dataspace);
-	hsize_t *dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
-	int status_n  = H5Sget_simple_extent_dims (dataspace, dims_out, NULL);
-	int psizes[NDIMS];
-	MPI_Offset starts[NDIMS];
+	dataspace = H5Dget_space (int_dataset_id);    /* dataspace handle */
+	dimrank  = H5Sget_simple_extent_ndims (dataspace);
+	dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
+	status_n  = H5Sget_simple_extent_dims (dataspace, dims_out, NULL);
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
 	MPI_Dims_create(nprocs, NDIMS, psizes);
@@ -347,31 +362,22 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, flo
 	starts[2] = rank % psizes[2];
 
 	/* Define hyperslab in the dataset. */
-	hsize_t     stride[NDIMS];
-	hsize_t     block[NDIMS];
-	hsize_t     count[NDIMS];              /* size of the hyperslab in the file */
-	hsize_t     offset[NDIMS];             /* hyperslab offset in the file */
 	for (i=0; i<NDIMS; i++) {
 		block[i] = dims_out[i] / psizes[i];
 		stride[i] = block[i];
 		count[i] = 1;
 		offset[i] = starts[i] * block[i];
 	}
-	herr_t status_h5 = H5Sselect_hyperslab (dataspace, H5S_SELECT_SET, offset, stride, count, block);
+	status_h5 = H5Sselect_hyperslab (dataspace, H5S_SELECT_SET, offset, stride, count, block);
 
 	/* Define the memory dataspace. */
-	hsize_t dimsm[NDIMS];
 	for (i=0; i<NDIMS; i++) {
 		dimsm[i] = block[i];
 	}
-	hid_t memspace = H5Screate_simple (NDIMS, dimsm, NULL);
+	memspace = H5Screate_simple (NDIMS, dimsm, NULL);
 
 	/* Define memory hyperslab. */
-	hsize_t     stride_out[NDIMS];
-	hsize_t     block_out[NDIMS];
-	hsize_t     count_out[NDIMS];              /* size of the hyperslab in the file */
-	hsize_t     offset_out[NDIMS];             /* hyperslab offset in the file */
-	int64_t     hypersize=1;
+	hypersize=1;
 	for (i=0; i<NDIMS; i++) {
 		block_out[i] = block[i];
 		stride_out[i] = block[i];
@@ -381,56 +387,60 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, flo
 	}
 	status_h5 = H5Sselect_hyperslab (memspace, H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
 
+	/* Allocate data_out */
+	for (i=0; i<NUM_VARS; i++) {
+		data_out[i] = (int *) malloc(hypersize * sizeof(int));
+		for (j=0; j<hypersize; j++) data_out[i][j] = -1;
+	}
+
 	/*
 	 * Read data from hyperslab in the file into the hyperslab in
 	 * memory and display.
 	 */
-	int* data_out = (int *) malloc( hypersize * sizeof(int) );
-	//printf("[%d] data_out size = %d integers.\n", rank, hypersize);
+	i = 0;
 	read_time_hyper = MPI_Wtime();
-	status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, dxpl_plist_id, data_out);
+	status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, dxpl_plist_id, data_out[i]);
 	read_time_hyper = MPI_Wtime() - read_time_hyper;
 	read_size_hyper = hypersize * sizeof(int);
 	MPI_Reduce(&read_size_hyper, &sum_read_size_hyper, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&read_time_hyper, &max_read_time_hyper, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
-	for (i=0; i<hypersize; i++) {
-		if (data_out[i] != ((rank+1)*10)) {
-			printf("ERROR!!! ~~~ [%d] data_out[%d] = %d\n", rank, i, data_out[i]);
+	for (j=0; j<hypersize; j++) {
+		if (data_out[i][j] != ((rank+1)*fmult)) {
+			printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
 		}
 	}
-	free(dset_data_int);
-	free(data_out);
 	free(dims_out);
+	for (i=0; i<NUM_VARS; i++) free(data_out[i]);
 
 	/* Get count and names of variables and attributes in file */
 	int nvars_check=0;
 	int natts_check=0;
-	cdf_vol_file_get_nitems(FILE, &nvars_check, CDF_VOL_VAR);
-	cdf_vol_file_get_nitems(FILE, &natts_check, CDF_VOL_ATT);
+	cdf_vol_file_get_nitems(filename, &nvars_check, CDF_VOL_VAR);
+	cdf_vol_file_get_nitems(filename, &natts_check, CDF_VOL_ATT);
 	if(rank==0) {
 		printf(" FILE: Num variables: %d -- Num attributes: %d\n", nvars_check, natts_check);
 	}
 	char varname[nvars_check][1024];
 	char attname[natts_check][1024];
 	for (i=0; i<nvars_check; i++) {
-		cdf_vol_file_get_iname(FILE, varname[i], i, CDF_VOL_VAR);
+		cdf_vol_file_get_iname(filename, varname[i], i, CDF_VOL_VAR);
 		if(rank==0) printf("var[%d]: %s\n", i, varname[i]);
 	}
 	for (i=0; i<natts_check; i++) {
-		cdf_vol_file_get_iname(FILE, attname[i], i, CDF_VOL_ATT);
+		cdf_vol_file_get_iname(filename, attname[i], i, CDF_VOL_ATT);
 		if(rank==0) printf("att[%d]: %s\n", i, attname[i]);
 	}
 
 	/* Also want the attributes attached to each variable */
 	int var_id = 0; /* Know there is an attribute on index 0... */
 	int natts_var_check=0;
-	cdf_vol_var_get_natts(FILE, varname[var_id], &natts_var_check);
+	cdf_vol_var_get_natts(filename, varname[var_id], &natts_var_check);
 	if(rank==0) {
 		printf(" var[%d] - Num attributes: %d\n", var_id, natts_var_check);
 	}
 	char var_attname[natts_var_check][1024];
 	for (i=0; i<natts_var_check; i++) {
-		cdf_vol_var_get_attname(FILE, varname[var_id], var_attname[i], i);
+		cdf_vol_var_get_attname(filename, varname[var_id], var_attname[i], i);
 		if(rank==0) printf(" var att[%d]: %s\n", i, var_attname[i]);
 	}
 
@@ -479,7 +489,7 @@ int main(int argc, char **argv) {
 	int nprocs, rank, i;
 	int dlen = DIMLEN;
 	int cmode = 0;
-	int err;
+	int err, fmult, pinfo;
 	int use_collective = 0;
 	int read_all=0;
 	int rm_file=1;
@@ -501,34 +511,41 @@ int main(int argc, char **argv) {
 			exit(-1);
 		}
 	}
+
 	MPI_Init(&argc, &argv);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
 	/* FIRST --> Using PnetCDF Only... */
+	pinfo = 1; fmult = 17;
 
 	/* Write multi-dimensional dataset (1st time for pNetCDF timeing) */
-	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, 17.0, 1);
+	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, fmult, pinfo);
 
 	/* Read the multi-dimensional dataset (1st time for pNetCDF timeing) */
-	read_cdf_col(MPI_COMM_WORLD, FILE, dlen, use_collective, 17.0);
+	read_cdf_col(MPI_COMM_WORLD, FILE, dlen, use_collective, fmult);
+	if (rm_file && rank==0) {
+		/* Use PnetCDF to delete the file */
+		err = ncmpi_delete( FILE, MPI_INFO_NULL);
+		handle_error(err, __LINE__);
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
 
 
 	/* SECOND --> Using HDF5 for Reading... */
+	pinfo = 0; fmult = 10;
 
 	/* Write multi-dimensional dataset (2nd time for VOL timeing) */
-	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, 10.0, 0);
+	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, fmult, pinfo);
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
-	read_cdf_vol(MPI_COMM_WORLD, FILE, dlen, use_collective, 10.0, read_all);
-
-
+	read_cdf_vol(MPI_COMM_WORLD, FILE, dlen, use_collective, fmult, read_all);
+	if (rm_file && rank==0) {
+		/* Use PnetCDF to delete the file */
+		err = ncmpi_delete( FILE, MPI_INFO_NULL);
+		handle_error(err, __LINE__);
+	}
 	MPI_Barrier(MPI_COMM_WORLD);
-	//if (rm_file) {
-	//	/* Use PnetCDF to delete the file */
-	//	err = ncmpi_delete( FILE, MPI_INFO_NULL);
-	//	handle_error(err, __LINE__);
-	//}
 
 	MPI_Finalize();
 	return 0;
