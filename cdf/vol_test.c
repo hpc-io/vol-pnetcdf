@@ -511,7 +511,7 @@ int main(int argc, char **argv) {
 	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, 17.0, 1);
 
 	/* Read the multi-dimensional dataset (1st time for pNetCDF timeing) */
-	read_cdf_col(MPI_COMM_WORLD, FILE, dlen, use_collective, 17.0, rm_file);
+	read_cdf_col(MPI_COMM_WORLD, FILE, dlen, use_collective, 17.0);
 
 
 	/* SECOND --> Using HDF5 for Reading... */
@@ -523,7 +523,7 @@ int main(int argc, char **argv) {
 	read_cdf_vol(MPI_COMM_WORLD, FILE, dlen, use_collective, 10.0, read_all);
 
 
-	MPI_Barrier(comm);
+	MPI_Barrier(MPI_COMM_WORLD);
 	//if (rm_file) {
 	//	/* Use PnetCDF to delete the file */
 	//	err = ncmpi_delete( FILE, MPI_INFO_NULL);
