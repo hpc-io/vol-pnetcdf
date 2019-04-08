@@ -14,7 +14,7 @@
 #define H5VL_CDF_VERSION     0
 #define H5VL_CDF_CACHE_SIZE  1024
 #define MAX_FILES_OPEN       1024
-#define LITTLE_ENDIAN_CDFVL  1             /* Define Endianess of Machine */
+#define LITTLE_ENDIAN_CDFVL  1            /* Define Endianess of Machine */
 
 #define H5VL_CFD_MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 

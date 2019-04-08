@@ -4,7 +4,9 @@
 #include <assert.h>
 #include "hdf5.h"
 #include "cdf_vol.h"
+//#define FILEREF "/Users/rzamora/remote-fs/testfileREF.nc"
 //#define FILE "/Users/rzamora/remote-fs/testfile.nc"
+#define FILEREF "testfileREF.nc"
 #define FILE "testfile.nc"
 #include <pnetcdf.h>
 
@@ -21,7 +23,7 @@
 
 #define NDIMS         3
 #define DIMLEN        8
-#define NUM_VARS      3
+#define NUM_VARS      10
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)
@@ -156,7 +158,7 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 		write_bw = sum_write_size/max_write_timing;
 		printf(" procs    Global array size  exec(sec)  write(MB/s)\n");
 		printf("-------  ------------------  ---------  -----------\n");
-		printf(" %4d    %4lld x %4lld x %4lld %8.2f  %10.2f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_write_timing, write_bw);
+		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_write_timing, write_bw);
 	}
 	MPI_Info_free(&info_used);
 
@@ -225,15 +227,15 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 
 	/* write one variable at a time */
 	for (i=0; i<NUM_VARS; i++) {
-		if (collective==1) {
+		//if (collective==1) {
 			/* read a subarray in collective mode */
 			err = ncmpi_get_vara_int_all(ncid, varids[1], starts, counts, buf[i]);
 			handle_error(err, __LINE__);
-		} else {
-			/* read a subarray in independent mode */
-			err = ncmpi_get_vara_int(ncid, varids[1], starts, counts, buf[i]);
-			handle_error(err, __LINE__);
-		}
+		//} else {
+		//	/* read a subarray in independent mode */
+		//	err = ncmpi_get_vara_int(ncid, varids[1], starts, counts, buf[i]);
+		//	handle_error(err, __LINE__);
+		//}
 	}
 
 	read_timing = MPI_Wtime() - read_timing;
@@ -265,16 +267,17 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 		read_bw = sum_read_size/max_read_timing;
 		printf(" procs    Global array size  exec(sec)  read(MB/s)\n");
 		printf("-------  ------------------  ---------  -----------\n");
-		printf(" %4d    %4lld x %4lld x %4lld %8.2f  %10.2f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_read_timing, read_bw);
+		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_read_timing, read_bw);
 	}
 
 	return nerrs;
 }
 
 /* Use HDF5 CDF VOL Connector to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all) {
+int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all, int validate) {
 
-	hid_t file_id, int_dataset_id, dbl_dataset_id, dataspace_id, dxpl_plist_id;  /* identifiers */
+	hid_t file_id, dataspace_id, dxpl_plist_id;  /* identifiers */
+	hid_t int_dataset_id[NUM_VARS];
 	hsize_t dims[2];
 	herr_t status;
 	char connector_name[25];
@@ -286,7 +289,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	int *data_out[NUM_VARS];
 	int *dset_data_int;
 	double *dset_data_dbl;
-	int nprocs, rank, i, j, err, nerrs=0;
+	int nprocs, rank, i, j, v, err, nerrs=0;
 	double open_time=0.0, read_time_all=0.0, read_time_hyper=0.0;
 	double max_open_time=0.0, max_read_time_all=0.0, max_read_time_hyper=0.0;
 	long read_size_all=1.0, read_size_hyper=1.0;
@@ -299,7 +302,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	hsize_t stride[NDIMS], block[NDIMS];
 	hsize_t count[NDIMS];              /* size of the hyperslab in the file */
 	hsize_t offset[NDIMS];             /* hyperslab offset in the file */
-	hid_t dataspace; /* dataspace handle */
+	hid_t dataspace[NUM_VARS]; /* dataspace handle */
 	int dimrank;
 	hsize_t *dims_out;
 	int status_n;
@@ -307,7 +310,12 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	MPI_Offset starts[NDIMS];
 	herr_t status_h5;
 	hsize_t dimsm[NDIMS];
-	hid_t memspace;
+	hid_t memspace[NUM_VARS];
+	int nvars_check, natts_check, var_id, natts_var_check;
+	hid_t attr1, attr2;
+	char attr_data[13];
+	char var_attr_data[13];
+	double read_bw;
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -333,59 +341,47 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	else
 		H5Pset_dxpl_mpio(dxpl_plist_id, H5FD_MPIO_INDEPENDENT);
 
+	/* Get count and names of variables and attributes in file */
+	nvars_check=0;
+	cdf_vol_file_get_nitems(filename, &nvars_check, CDF_VOL_VAR);
+	//if(rank==0) {
+	//	printf(" FILE: Num variables: %d\n", nvars_check);
+	//}
+	char varname[nvars_check][1024];
+	for (i=0; i<nvars_check; i++) {
+		cdf_vol_file_get_iname(filename, varname[i], i, CDF_VOL_VAR);
+		//if(rank==0) printf("var[%d]: %s\n", i, varname[i]);
+	}
+
+
+	/* Use H5S_ALL to read 0th variable */
 	if (read_all) {
 		/* Read 3D integer dataset (H5S_ALL) */
-		int_dataset_id = H5Dopen(file_id, "var0", H5P_DEFAULT);
-		bytecnt = H5Dget_storage_size(int_dataset_id);
+		var_id = 0;
+		int_dataset_id[var_id] = H5Dopen(file_id, varname[var_id], H5P_DEFAULT);
+		bytecnt = H5Dget_storage_size(int_dataset_id[var_id]);
 		dset_data_int = (int *) malloc( bytecnt );
 		read_time_all = MPI_Wtime();
-		status = H5Dread(int_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_int);
+		status = H5Dread(int_dataset_id[var_id], H5T_NATIVE_INT, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_int);
 		read_time_all = MPI_Wtime() - read_time_all;
 		read_size_all = bytecnt;
 		MPI_Reduce(&read_size_all, &sum_read_size_all, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 		MPI_Reduce(&read_time_all, &max_read_time_all, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
-		H5Dclose(int_dataset_id);
+		H5Dclose(int_dataset_id[var_id]);
 		free(dset_data_int);
 	}
 
-	/* Read simple hyperslab selection from var1 */
-	int_dataset_id = H5Dopen(file_id, "var0", H5P_DEFAULT);
-	dataspace = H5Dget_space (int_dataset_id);    /* dataspace handle */
-	dimrank  = H5Sget_simple_extent_ndims (dataspace);
-	dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
-	status_n  = H5Sget_simple_extent_dims (dataspace, dims_out, NULL);
+	/* Use MPI_Dims_create to choose hyperslab decomposition */
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
 	MPI_Dims_create(nprocs, NDIMS, psizes);
 	starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
 	starts[1] = (rank / psizes[2]) % psizes[1];
 	starts[2] = rank % psizes[2];
-
-	/* Define hyperslab in the dataset. */
-	for (i=0; i<NDIMS; i++) {
-		block[i] = dims_out[i] / psizes[i];
-		stride[i] = block[i];
-		count[i] = 1;
-		offset[i] = starts[i] * block[i];
-	}
-	status_h5 = H5Sselect_hyperslab (dataspace, H5S_SELECT_SET, offset, stride, count, block);
-
-	/* Define the memory dataspace. */
-	for (i=0; i<NDIMS; i++) {
-		dimsm[i] = block[i];
-	}
-	memspace = H5Screate_simple (NDIMS, dimsm, NULL);
-
-	/* Define memory hyperslab. */
 	hypersize=1;
 	for (i=0; i<NDIMS; i++) {
-		block_out[i] = block[i];
-		stride_out[i] = block[i];
-		count_out[i] = 1;
-		offset_out[i] = 0;
-		hypersize *= block[i];
+		hypersize *= len;
 	}
-	status_h5 = H5Sselect_hyperslab (memspace, H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
 
 	/* Allocate data_out */
 	for (i=0; i<NUM_VARS; i++) {
@@ -393,64 +389,97 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		for (j=0; j<hypersize; j++) data_out[i][j] = -1;
 	}
 
+	/* Open all variables and define hyperslab selections */
+	read_size_hyper = 0;
+	for(var_id=0; var_id<NUM_VARS; var_id++) {
+
+		/* Read simple hyperslab selection from var1 */
+		int_dataset_id[var_id] = H5Dopen(file_id, varname[var_id], H5P_DEFAULT);
+		dataspace[var_id] = H5Dget_space (int_dataset_id[var_id]);    /* dataspace handle */
+		dimrank  = H5Sget_simple_extent_ndims (dataspace[var_id]);
+		dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
+		status_n  = H5Sget_simple_extent_dims (dataspace[var_id], dims_out, NULL);
+
+		/* Define hyperslab in the dataset. */
+		for (i=0; i<NDIMS; i++) {
+			block[i] = dims_out[i] / psizes[i];
+			stride[i] = block[i];
+			count[i] = 1;
+			offset[i] = starts[i] * block[i];
+		}
+		status_h5 = H5Sselect_hyperslab (dataspace[var_id], H5S_SELECT_SET, offset, stride, count, block);
+
+		/* Define the memory dataspace. */
+		for (i=0; i<NDIMS; i++) {
+			dimsm[i] = block[i];
+		}
+		memspace[var_id] = H5Screate_simple (NDIMS, dimsm, NULL);
+
+		/* Define memory hyperslab. */
+		hypersize=1;
+		for (i=0; i<NDIMS; i++) {
+			block_out[i] = block[i];
+			stride_out[i] = block[i];
+			count_out[i] = 1;
+			offset_out[i] = 0;
+			hypersize *= block[i];
+		}
+		read_size_hyper += hypersize * sizeof(int);
+		status_h5 = H5Sselect_hyperslab (memspace[var_id], H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
+
+	}
+
 	/*
 	 * Read data from hyperslab in the file into the hyperslab in
 	 * memory and display.
 	 */
-	i = 0;
 	read_time_hyper = MPI_Wtime();
-	status_h5 = H5Dread (int_dataset_id, H5T_NATIVE_INT, memspace, dataspace, dxpl_plist_id, data_out[i]);
+	for(var_id=0; var_id<NUM_VARS; var_id++) {
+		status_h5 = H5Dread (int_dataset_id[var_id], H5T_NATIVE_INT, memspace[var_id], dataspace[var_id], dxpl_plist_id, data_out[var_id]);
+	}
 	read_time_hyper = MPI_Wtime() - read_time_hyper;
-	read_size_hyper = hypersize * sizeof(int);
+
+	/* Validate the read-in data */
 	MPI_Reduce(&read_size_hyper, &sum_read_size_hyper, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&read_time_hyper, &max_read_time_hyper, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
-	for (j=0; j<hypersize; j++) {
-		if (data_out[i][j] != ((rank+1)*fmult)) {
-			printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
+	if (validate) {
+		for(i=0; i<NUM_VARS; i++) {
+			for (j=0; j<hypersize; j++) {
+				if (data_out[i][j] != ((rank+1)*fmult)) {
+					printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
+				}
+			}
 		}
 	}
 	free(dims_out);
 	for (i=0; i<NUM_VARS; i++) free(data_out[i]);
 
-	/* Get count and names of variables and attributes in file */
-	int nvars_check=0;
-	int natts_check=0;
-	cdf_vol_file_get_nitems(filename, &nvars_check, CDF_VOL_VAR);
+	/* Also want global and variable attributes */
+	natts_check=0;
 	cdf_vol_file_get_nitems(filename, &natts_check, CDF_VOL_ATT);
-	if(rank==0) {
-		printf(" FILE: Num variables: %d -- Num attributes: %d\n", nvars_check, natts_check);
-	}
-	char varname[nvars_check][1024];
 	char attname[natts_check][1024];
-	for (i=0; i<nvars_check; i++) {
-		cdf_vol_file_get_iname(filename, varname[i], i, CDF_VOL_VAR);
-		if(rank==0) printf("var[%d]: %s\n", i, varname[i]);
-	}
 	for (i=0; i<natts_check; i++) {
 		cdf_vol_file_get_iname(filename, attname[i], i, CDF_VOL_ATT);
-		if(rank==0) printf("att[%d]: %s\n", i, attname[i]);
+		//if(rank==0) printf("att[%d]: %s\n", i, attname[i]);
 	}
-
-	/* Also want the attributes attached to each variable */
-	int var_id = 0; /* Know there is an attribute on index 0... */
-	int natts_var_check=0;
+	//if(rank==0) {
+	//	printf(" FILE: Num attributes: %d\n", natts_check);
+	//}
+	natts_var_check=0; var_id = 0; /* Know there is an attribute on index 0... */
 	cdf_vol_var_get_natts(filename, varname[var_id], &natts_var_check);
-	if(rank==0) {
-		printf(" var[%d] - Num attributes: %d\n", var_id, natts_var_check);
-	}
 	char var_attname[natts_var_check][1024];
+	//if(rank==0) {
+	//	printf(" var[%d] - Num attributes: %d\n", var_id, natts_var_check);
+	//}
 	for (i=0; i<natts_var_check; i++) {
 		cdf_vol_var_get_attname(filename, varname[var_id], var_attname[i], i);
-		if(rank==0) printf(" var att[%d]: %s\n", i, var_attname[i]);
+		//if(rank==0) printf(" var att[%d]: %s\n", i, var_attname[i]);
 	}
 
-	/* Read Attribute */
-	hid_t attr1, attr2;
-	char attr_data[13];
-	char var_attr_data[13];
+	/* Read Attributes */
 	attr1 = H5Aopen_name (file_id, attname[0]);
 	H5Aread(attr1, H5T_NATIVE_CHAR, attr_data);
-	attr2 = H5Aopen_name (int_dataset_id, var_attname[0]);
+	attr2 = H5Aopen_name (int_dataset_id[var_id], var_attname[0]);
 	H5Aread(attr2, H5T_NATIVE_CHAR, var_attr_data);
 
 	/* Summarize the results */
@@ -465,8 +494,19 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		printf("  READ_HYPER:  size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n\n", size_rpt, max_read_time_hyper, size_rpt/max_read_time_hyper);
 	}
 
+	if (0 && rank == 0) {
+		//float subarray_size = (float)hypersize*sizeof(int)/1048576.0;
+		//printf("Local array size %d x %d x %d integers, size = %.2f MB\n",len,len,len,subarray_size);
+		sum_read_size_hyper /= 1048576.0;
+		//printf("Global array size %lld x %lld x %lld integers, read size = %.2f GB\n", gsizes[0], gsizes[1], gsizes[2], sum_read_size/1024.0);
+		read_bw = sum_read_size_hyper / max_read_time_hyper;
+		printf(" procs    Global array size  exec(sec)  read(MB/s)\n");
+		printf("-------  ------------------  ---------  -----------\n");
+		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, block[0]*psizes[0], block[1]*psizes[1], block[2]*psizes[2], max_read_time_hyper, read_bw);
+	}
+
 	/* Close File etc */
-	H5Dclose(int_dataset_id);
+	for (i=0; i<NUM_VARS; i++) H5Dclose(int_dataset_id[i]);
 	H5Aclose(attr1);
 	H5Aclose(attr2);
 	H5Fclose(file_id);
@@ -493,6 +533,7 @@ int main(int argc, char **argv) {
 	int use_collective = 0;
 	int read_all=0;
 	int rm_file=1;
+	int validate=1;
 
 	/* Parse Inpu Args */
 	for (i=1;i<argc;i++) {
@@ -506,6 +547,8 @@ int main(int argc, char **argv) {
 			read_all = 1; /* Try an additional SELCT_ALL read */
 		} else if (strcmp(argv[i],"--keep") == 0) {
 			rm_file = 0; /* Don't remove the file when done */
+		} else if (strcmp(argv[i],"--nocheck") == 0) {
+			validate = 0; /* Don't validate the data */
 		} else {
 			printf("ERROR - unrecognized parameter: %s.  Exitting.\n",argv[i]);
 			exit(-1);
@@ -517,31 +560,35 @@ int main(int argc, char **argv) {
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
 	/* FIRST --> Using PnetCDF Only... */
-	pinfo = 1; fmult = 17;
 
 	/* Write multi-dimensional dataset (1st time for pNetCDF timeing) */
+	pinfo = 1; fmult = 17;
+	write_cdf_col(MPI_COMM_WORLD, FILEREF, cmode, dlen, fmult, pinfo);
+
+	/* Write multi-dimensional dataset (2nd time for VOL timeing) */
+	pinfo = 0; fmult = 10;
 	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, fmult, pinfo);
 
 	/* Read the multi-dimensional dataset (1st time for pNetCDF timeing) */
-	read_cdf_col(MPI_COMM_WORLD, FILE, dlen, use_collective, fmult);
-	if (rm_file && rank==0) {
-		/* Use PnetCDF to delete the file */
-		err = ncmpi_delete( FILE, MPI_INFO_NULL);
-		handle_error(err, __LINE__);
-	}
+	pinfo = 0; fmult = 17;
+	read_cdf_col(MPI_COMM_WORLD, FILEREF, dlen, use_collective, fmult);
 	MPI_Barrier(MPI_COMM_WORLD);
 
 
 	/* SECOND --> Using HDF5 for Reading... */
-	pinfo = 0; fmult = 10;
-
-	/* Write multi-dimensional dataset (2nd time for VOL timeing) */
-	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, fmult, pinfo);
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
-	read_cdf_vol(MPI_COMM_WORLD, FILE, dlen, use_collective, fmult, read_all);
+	pinfo = 0; fmult = 10;
+	read_cdf_vol(MPI_COMM_WORLD, FILE, dlen, use_collective, fmult, read_all, validate);
+
+
+	/* Remove files */
 	if (rm_file && rank==0) {
-		/* Use PnetCDF to delete the file */
+		/* Use PnetCDF to delete FILEREF */
+		err = ncmpi_delete( FILEREF, MPI_INFO_NULL);
+		handle_error(err, __LINE__);
+
+		/* Use PnetCDF to delete FILE */
 		err = ncmpi_delete( FILE, MPI_INFO_NULL);
 		handle_error(err, __LINE__);
 	}
