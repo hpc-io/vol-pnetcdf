@@ -26,8 +26,10 @@ ${FNAME}.o: ${FNAME}.c ${VOLNAME}.o
 ${EXE}: ${FNAME}.o ${VOLNAME}.o
 	${MPICC} ${FNAME}.o ${VOLNAME}.o -o ${EXE} -L${HDF5_INSTALL_DIR}/lib -lhdf5 -L${PNETCDF_INSTALL_DIR}/lib -lpnetcdf
 
+install:
+	mv -f ${EXE} bin/${EXE}
+
 clean:
 	rm -f ${FNAME}.o
 	rm -f ${VOLNAME}.o
-	rm -f ${EXE}
-	rm -f *.h5
+	rm -f bin/${EXE}

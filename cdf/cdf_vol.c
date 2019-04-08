@@ -1840,8 +1840,10 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 #endif
 
 		/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
-		for (i=0; i<(var->vsize); i+=var->nc_type_size){
-			bytestr_rev(&charbuf[i],var->nc_type_size);
+		if(LITTLE_ENDIAN_CDFVL) {
+			for (i=0; i<(var->vsize); i+=var->nc_type_size){
+				bytestr_rev(&charbuf[i],var->nc_type_size);
+			}
 		}
 
 	} else if (h5selType == H5S_SEL_HYPERSLABS) {
@@ -1875,8 +1877,10 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 			pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
 #endif
 			/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
-			for (i=0; i<(var->vsize); i+=var->nc_type_size){
-				bytestr_rev(&charbuf[i],var->nc_type_size);
+			if(LITTLE_ENDIAN_CDFVL) {
+				for (i=0; i<(var->vsize); i+=var->nc_type_size){
+					bytestr_rev(&charbuf[i],var->nc_type_size);
+				}
 			}
 
 		} else {
@@ -1961,8 +1965,10 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 			}
 #endif
 			/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
-			for (i=0; i<(npoints * var->nc_type_size); i+=var->nc_type_size){
-				bytestr_rev(&output_data[i],var->nc_type_size);
+			if(LITTLE_ENDIAN_CDFVL) {
+				for (i=0; i<(npoints * var->nc_type_size); i+=var->nc_type_size){
+					bytestr_rev(&output_data[i],var->nc_type_size);
+				}
 			}
 
 			/* Assign data to proper memory-space selection */
