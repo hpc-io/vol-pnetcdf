@@ -490,7 +490,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 			printf("\n  File Attribute = %s", attr_data);
 			printf("  Variable Attribute = %s", var_attr_data);
 		}
-		//printf("\n  FILE_OPEN: time[s]=%f\n", max_open_time);
+		printf("  CDFVL_FILE_OPEN: time[s]=%f\n", max_open_time);
 		if (read_all) {
 			size_rpt = ((double)sum_read_size_all) / 1048576.0;
 			printf("  CDFVL_READ_ALL: size[MB]=%ld time[s]=%f bandwidth[MB/s]=%f\n", (long)size_rpt, max_read_time_all, size_rpt/max_read_time_all);

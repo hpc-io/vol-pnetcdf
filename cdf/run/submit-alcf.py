@@ -14,7 +14,7 @@ print("Using Python version: "+str(sys.version_info[0]))
 # Machine Specific
 machine   = "theta"
 srcroot   = "/home/zamora/hdf5_root_dir/xgitlabrepos/pnetcdf_vol"
-fsroot    = "/projects/datascience/rzamora"
+fsroot    = " /lus/theta-fs0/projects/datascience/rzamora"
 ppn_in    = 32
 nranksmin = 1024
 
