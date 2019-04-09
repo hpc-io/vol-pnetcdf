@@ -4,8 +4,6 @@
 #include <assert.h>
 #include "hdf5.h"
 #include "cdf_vol.h"
-//#define FILEREF "/Users/rzamora/remote-fs/testfileREF.nc"
-//#define FILE "/Users/rzamora/remote-fs/testfile.nc"
 #define FILEREF "testfileREF.nc"
 #define FILE "testfile.nc"
 #include <pnetcdf.h>
@@ -23,7 +21,7 @@
 
 #define NDIMS         3
 #define DIMLEN        8
-#define NUM_VARS      10
+#define NUM_VARS      1
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)
@@ -149,7 +147,7 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	MPI_Reduce(&write_size, &sum_write_size, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&write_timing, &max_write_timing, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
 
-	if ((rank == 0) && (pinfo==1)) {
+	if ((rank == 0) && (pinfo==1) && 0) {
 		float subarray_size = (float)bufsize*sizeof(int)/1048576.0;
 		print_info(&info_used);
 		printf("Local array size %d x %d x %d integers, size = %.2f MB\n",len,len,len,subarray_size);
@@ -229,7 +227,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	for (i=0; i<NUM_VARS; i++) {
 		//if (collective==1) {
 			/* read a subarray in collective mode */
-			err = ncmpi_get_vara_int_all(ncid, varids[1], starts, counts, buf[i]);
+			err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
 			handle_error(err, __LINE__);
 		//} else {
 		//	/* read a subarray in independent mode */
@@ -259,7 +257,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	MPI_Reduce(&read_size, &sum_read_size, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&read_timing, &max_read_timing, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
 
-	if (rank == 0) {
+	if (rank == 0 && 0) {
 		float subarray_size = (float)bufsize*sizeof(int)/1048576.0;
 		//printf("Local array size %d x %d x %d integers, size = %.2f MB\n",len,len,len,subarray_size);
 		sum_read_size /= 1048576.0;
@@ -269,12 +267,16 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 		printf("-------  ------------------  ---------  -----------\n");
 		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_read_timing, read_bw);
 	}
+	if (rank == 0) {
+		sum_read_size /= 1048576.0;
+		printf("  CDF_READ_HYPER: size[MB]=%lld time[s]=%f bandwidth[MB/s]=%f\n", sum_read_size, max_read_timing, sum_read_size/max_read_timing);
+	}
 
 	return nerrs;
 }
 
 /* Use HDF5 CDF VOL Connector to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all, int validate) {
+int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all, int validate, int print_atts) {
 
 	hid_t file_id, dataspace_id, dxpl_plist_id;  /* identifiers */
 	hid_t int_dataset_id[NUM_VARS];
@@ -484,14 +486,17 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 
 	/* Summarize the results */
 	if (rank == 0) {
-		printf("\n  File Attribute = %s", attr_data);
-		printf("  Variable Attribute = %s", var_attr_data);
-		printf("\n  FILE_OPEN:   time[s]=%f\n", max_open_time);
-		size_rpt = ((double)sum_read_size_all) / 1048576.0;
-		if (read_all)
-			printf("  READ_ALL:    size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n", size_rpt, max_read_time_all, size_rpt/max_read_time_all);
+		if (print_atts) {
+			printf("\n  File Attribute = %s", attr_data);
+			printf("  Variable Attribute = %s", var_attr_data);
+		}
+		//printf("\n  FILE_OPEN: time[s]=%f\n", max_open_time);
+		if (read_all) {
+			size_rpt = ((double)sum_read_size_all) / 1048576.0;
+			printf("  CDFVL_READ_ALL: size[MB]=%ld time[s]=%f bandwidth[MB/s]=%f\n", (long)size_rpt, max_read_time_all, size_rpt/max_read_time_all);
+		}
 		size_rpt = ((double)sum_read_size_hyper) / 1048576.0;
-		printf("  READ_HYPER:  size[MB]=%f  time[s]=%f  bandwidth[MB/s]=%f\n\n", size_rpt, max_read_time_hyper, size_rpt/max_read_time_hyper);
+		printf("  CDFVL_READ_HYPER: size[MB]=%ld time[s]=%f bandwidth[MB/s]=%f\n", (long)size_rpt, max_read_time_hyper, size_rpt/max_read_time_hyper);
 	}
 
 	if (0 && rank == 0) {
@@ -502,7 +507,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		read_bw = sum_read_size_hyper / max_read_time_hyper;
 		printf(" procs    Global array size  exec(sec)  read(MB/s)\n");
 		printf("-------  ------------------  ---------  -----------\n");
-		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, block[0]*psizes[0], block[1]*psizes[1], block[2]*psizes[2], max_read_time_hyper, read_bw);
+		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n", nprocs, block[0]*psizes[0], block[1]*psizes[1], block[2]*psizes[2], max_read_time_hyper, read_bw);
 	}
 
 	/* Close File etc */
@@ -534,11 +539,16 @@ int main(int argc, char **argv) {
 	int read_all=0;
 	int rm_file=1;
 	int validate=1;
+	int print_atts=0;
+	char filestr1[1024]="";
+	char filestr2[1024]="";
 
 	/* Parse Inpu Args */
 	for (i=1;i<argc;i++) {
 		if (strcmp(argv[i],"--dimlen") == 0) {
 			i++; dlen = atoi(argv[i]);
+		} else if (strcmp(argv[i],"--fsroot") == 0) {
+			i++; strcat(filestr1, argv[i]); strcat(filestr2, argv[i]);
 		} else if (strcmp(argv[i],"--cmode") == 0) {
 			i++; cmode = atoi(argv[i]);
 		} else if (strcmp(argv[i],"--col") == 0) {
@@ -549,11 +559,15 @@ int main(int argc, char **argv) {
 			rm_file = 0; /* Don't remove the file when done */
 		} else if (strcmp(argv[i],"--nocheck") == 0) {
 			validate = 0; /* Don't validate the data */
+		} else if (strcmp(argv[i],"--atts") == 0) {
+			print_atts = 1; /* Print Attributes */
 		} else {
 			printf("ERROR - unrecognized parameter: %s.  Exitting.\n",argv[i]);
 			exit(-1);
 		}
 	}
+	strcat(filestr1, FILE);
+	strcat(filestr2, FILEREF);
 
 	MPI_Init(&argc, &argv);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -563,15 +577,15 @@ int main(int argc, char **argv) {
 
 	/* Write multi-dimensional dataset (1st time for pNetCDF timeing) */
 	pinfo = 1; fmult = 17;
-	write_cdf_col(MPI_COMM_WORLD, FILEREF, cmode, dlen, fmult, pinfo);
+	write_cdf_col(MPI_COMM_WORLD, filestr2, cmode, dlen, fmult, pinfo);
 
 	/* Write multi-dimensional dataset (2nd time for VOL timeing) */
 	pinfo = 0; fmult = 10;
-	write_cdf_col(MPI_COMM_WORLD, FILE, cmode, dlen, fmult, pinfo);
+	write_cdf_col(MPI_COMM_WORLD, filestr1, cmode, dlen, fmult, pinfo);
 
 	/* Read the multi-dimensional dataset (1st time for pNetCDF timeing) */
 	pinfo = 0; fmult = 17;
-	read_cdf_col(MPI_COMM_WORLD, FILEREF, dlen, use_collective, fmult);
+	read_cdf_col(MPI_COMM_WORLD, filestr2, dlen, use_collective, fmult);
 	MPI_Barrier(MPI_COMM_WORLD);
 
 
@@ -579,17 +593,17 @@ int main(int argc, char **argv) {
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
 	pinfo = 0; fmult = 10;
-	read_cdf_vol(MPI_COMM_WORLD, FILE, dlen, use_collective, fmult, read_all, validate);
+	read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_all, validate, print_atts);
 
 
 	/* Remove files */
 	if (rm_file && rank==0) {
-		/* Use PnetCDF to delete FILEREF */
-		err = ncmpi_delete( FILEREF, MPI_INFO_NULL);
+		/* Use PnetCDF to delete filestr2 */
+		err = ncmpi_delete( filestr2, MPI_INFO_NULL);
 		handle_error(err, __LINE__);
 
-		/* Use PnetCDF to delete FILE */
-		err = ncmpi_delete( FILE, MPI_INFO_NULL);
+		/* Use PnetCDF to delete filestr1 */
+		err = ncmpi_delete( filestr1, MPI_INFO_NULL);
 		handle_error(err, __LINE__);
 	}
 	MPI_Barrier(MPI_COMM_WORLD);
