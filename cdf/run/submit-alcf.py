@@ -18,11 +18,11 @@ fsroot    = " /lus/theta-fs0/projects/datascience/rzamora"
 ppn_in    = 32
 nranksmin = 1024
 
-#machine   = "other"
-#srcroot   = "/Users/rzamora/remote-fs/theta_pnetcdf_vol"
-#fsroot    = "/Users/rzamora/remote-fs"
-#ppn       = 4
-#nranksmin = 2
+machine   = "other"
+srcroot   = "/Users/rzamora/IO/CCIO/xgitlabrepos/pnetcdf_vol"
+fsroot    = "/Users/rzamora/IO/CCIO/xgitlabrepos/pnetcdf_vol/scratch"
+ppn       = 2
+nranksmin = 2
 
 # Important Benchmarking Settings
 benchname = "hdf5-cdfvl-20190904"
@@ -32,7 +32,7 @@ outroot   = benchroot + "/run/results/" + benchname
 execname  = benchroot + "/bin/vol_test.ex"
 lfs_count = 52    # Number of Stripes in LUSTRE
 lfs_size  = 8     # Size of Stripes in LUSTRE (MB Units)
-nodes_in  = 1     # Ignored if machine is "vesta" or "theta"
+nodes_in  = 2     # Ignored if machine is "vesta" or "theta"
 nocheck   = False # Can turn off data validation in benchmark
 
 # Parse command line inputs

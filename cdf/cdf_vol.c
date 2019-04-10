@@ -107,6 +107,7 @@ typedef struct cdf_var_t {
 	hsize_t *dimlens; /* Size of each dimension */
 	cdf_non_neg_t natts; /* number of attributes for this var */
 	cdf_att_t *atts; /* list of cdf_att_t objects for this var */
+	int is_record; /* This is a record variable */
 } cdf_var_t;
 
 /* The CDF VOL info object */
@@ -114,6 +115,7 @@ typedef struct H5VL_cdf_t {
 	char *fname; /* Store the file name */
 	uint8_t fmt; /* CDF File Spec (1,2,5) */
 	cdf_non_neg_t numrecs; /* length of record dimension */
+	cdf_non_neg_t record_stride; /* Stride between records of same variable */
 	cdf_non_neg_t ndims; /* number of dimensions */
 	cdf_non_neg_t natts; /* number of attributes */
 	cdf_non_neg_t nvars; /* number of variables */
@@ -680,7 +682,6 @@ get_cdf_spec(H5VL_cdf_t* file, off_t *rdoff)
 static cdf_non_neg_t
 get_non_neg(H5VL_cdf_t* file, off_t *rdoff)
 {
-	/* Read length of record dimension (numrecs) */
 	if (file->fmt < 5) {
 		/* NON_NEG = <non-negative INT> = <32-bit signed integer, Bigendian, two's complement> */
 		return (cdf_non_neg_t) get_uint32_t(file,rdoff);
@@ -701,7 +702,6 @@ get_non_neg(H5VL_cdf_t* file, off_t *rdoff)
 static cdf_offset_t
 get_offset(H5VL_cdf_t* file, off_t *rdoff)
 {
-	/* Read length of record dimension (numrecs) */
 	if (file->fmt < 2) {
 		/* NON_NEG = <non-negative INT> = <32-bit signed integer, Bigendian, two's complement> */
 		return (cdf_offset_t) get_uint32_t(file,rdoff);
@@ -980,6 +980,9 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 		 * var	=	name nelems [dimid ...] vatt_list nc_type vsize begin
 		 */
 
+		/* Start by assuming this is not a record variable */
+		vars[ivar].is_record = 0;
+
 		/* Get variable name */
 		vars[ivar].name = get_cdf_name_t(file, rdoff);
 
@@ -1000,6 +1003,9 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 				printf("[%d] vars[%d].dimids[%d] = %llu\n", file->rank, ivar, id, vars[ivar].dimids[id]);
 				printf("[%d] vars[%d].dimlens[%d] = %llu\n", file->rank, ivar, id, vars[ivar].dimlens[id]);
 #endif
+				if ((id==0) && (vars[ivar].dimlens[id]==0)) {
+					vars[ivar].is_record = 1;
+				}
 			}
 
 		}
@@ -1025,6 +1031,12 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] vars[%d].offset = %llu\n", file->rank, ivar, vars[ivar].offset);
 #endif
+
+		/* If this is a record variable, increment the stride between records */
+		if (vars[ivar].is_record == 1) {
+			H5VL_cdf_t *fileptr = (H5VL_cdf_t *) vars[ivar].file;
+			fileptr->record_stride += vars[ivar].vsize;
+		}
 
 	}
 
@@ -1134,6 +1146,7 @@ H5VL_cdf_new_obj_mpio(MPI_File fh, hid_t acc_tpl)
 	new_obj->fh = fh;
 	new_obj->fmt = 0;
 	new_obj->numrecs = 0;
+	new_obj->record_stride = 0;
 	new_obj->ndims = 0;
 	new_obj->natts = 0;
 	if (H5Pget_driver(acc_tpl) == H5FD_MPIO) {
@@ -1173,6 +1186,7 @@ H5VL_cdf_new_obj(int fd)
 	new_obj->fd = fd;
 	new_obj->fmt = 0;
 	new_obj->numrecs = 0;
+	new_obj->record_stride = 0;
 	new_obj->ndims = 0;
 	new_obj->natts = 0;
 	new_obj->rank = 0;
@@ -1799,6 +1813,11 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		printf("[%d] <%s> In H5VL_cdf_dataset_read\n",file->rank, var->name->string);
 #endif
 
+	if (var->is_record == 1) {
+		printf("ERROR!!! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables\n",var->name->string);
+		return -1;
+	}
+
 	dataTypeSize = H5Tget_size(mem_type_id);
 	memSelType = H5S_SEL_ALL;
 	if (mem_space_id != 0) {
@@ -1828,16 +1847,24 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		printf("[%d] <%s> Reading %llu values for file offset %llu\n", file->rank, var->name->string, var->vsize, var->offset);
 		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
+
+		if (var->is_record == 1) {
+
 #ifdef H5_VOL_HAVE_PARALLEL
-		/* Use MPI-IO to read entire variable */
-		if (xfer_mode == H5FD_MPIO_COLLECTIVE)
-			MPI_File_read_at_all( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
-		else
-			MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+			/* Use MPI-IO to read entire variable */
+			if (xfer_mode == H5FD_MPIO_COLLECTIVE)
+				MPI_File_read_at_all( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+			else
+				MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
 #else
-		/* Use POSIX to read entire variable */
-		pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
+			/* Use POSIX to read entire variable */
+			pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
 #endif
+
+		} else {
+			/* Add algorithm for record variables here (variable may not be stored contiguously) */
+
+		}
 
 		/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
 		if(LITTLE_ENDIAN_CDFVL) {
