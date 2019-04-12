@@ -20,8 +20,8 @@
  */
 
 #define NDIMS         3
-#define DIMLEN        8
-#define NUM_VARS      1
+#define DIMLEN        2
+#define NUM_VARS      2
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)
@@ -53,11 +53,11 @@ static void print_info(MPI_Info *info_used)
 }
 
 /* Use pNetCDF to write NDIMS-dimensional datasets to a test file */
-int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, int pinfo) {
+int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, int pinfo, int nrecords) {
 
 	char str[512];
 	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
-	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS], varids[NUM_VARS];
+	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS+1], varids[NUM_VARS];
 	double write_timing, max_write_timing, write_bw;
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset write_size, sum_write_size;
@@ -65,9 +65,40 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	char attrbuf[13] = "Hello World\n";
 	char varattrbuf[13] = "Hello Var01\n";
 
+	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
+	int *buf_rec[NUM_VARS], psizes_rec[NDIMS];
+	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
+
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
 
+	/* Setup record-variable layout (Each record is 2-Dimensional) */
+	if (nrecords > 0) {
+		for (i=0; i<NDIMS; i++)
+			psizes_rec[i] = 0;
+		MPI_Dims_create(nprocs, (NDIMS-1), &psizes_rec[1]);
+		starts_rec[1] = (rank / psizes_rec[2]) % psizes_rec[1];
+		starts_rec[2] = rank % psizes_rec[2];
+		bufsize = 1;
+		psizes_rec[0] = 1;
+		starts_rec[0] = 0;
+		counts_rec[0] = 1;
+		for (i=1; i<NDIMS; i++) {
+			starts_rec[i] *= len;
+			counts_rec[i]  = len;
+			bufsize   *= len;
+		}
+		/* allocate buffer and initialize with non-zero numbers */
+		for (i=0; i<NUM_VARS; i++) {
+			buf_rec[i] = (int *) malloc(bufsize * sizeof(int));
+			for (j=0; j<bufsize; j++) buf_rec[i][j] = (rank+1 + (i*1000))*fmult;
+		}
+
+		//for (j=0; j<NDIMS; j++)
+		//	printf(" (1) [%d] psizes_rec[%d] = %d, starts_rec[%d] = %lld, counts_rec[%d] = %lld\n", rank, j, psizes_rec[j], j, starts_rec[j], j, counts_rec[j]);
+	}
+
+	/* Now, setup non-record-variable layout (3-Dimensional) */
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
 	MPI_Dims_create(nprocs, NDIMS, psizes);
@@ -81,11 +112,10 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 		counts[i]  = len;
 		bufsize   *= len;
 	}
-
 	/* allocate buffer and initialize with non-zero numbers */
 	for (i=0; i<NUM_VARS; i++) {
 		buf[i] = (int *) malloc(bufsize * sizeof(int));
-		for (j=0; j<bufsize; j++) buf[i][j] = (rank+1)*fmult;
+		for (j=0; j<bufsize; j++) buf[i][j] = (rank+1 + (i*1000))*fmult;
 	}
 
 	/* create the file */
@@ -99,17 +129,29 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	}
 
 	/* define dimensions */
-	for (i=0; i<NDIMS; i++) {
-		sprintf(str, "%c", 'x'+i);
-		err = ncmpi_def_dim(ncid, str, gsizes[i], &dimids[i]);
-		handle_error(err, __LINE__);
+	for (i=0; i<(NDIMS+1); i++) {
+		if (i==0) {
+			/* Define the record dimension */
+			err = ncmpi_def_dim(ncid, "REC_DIM", NC_UNLIMITED, &dimids[0]);
+			handle_error(err, __LINE__);
+		} else {
+			sprintf(str, "x%d", i);
+			err = ncmpi_def_dim(ncid, str, gsizes[i-1], &dimids[i]);
+			handle_error(err, __LINE__);
+		}
 	}
 
 	/* define variables */
 	for (i=0; i<NUM_VARS; i++) {
-		sprintf(str, "var%d", i);
-		err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids, &varids[i]);
-		handle_error(err, __LINE__);
+		if (i<nrecords) {
+			sprintf(str, "recvar%d", i);
+			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, &dimids[0], &varids[i]);
+			handle_error(err, __LINE__);
+		} else {
+			sprintf(str, "var%d", i);
+			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, &dimids[1], &varids[i]);
+			handle_error(err, __LINE__);
+		}
 	}
 
 	/* Write attribute (Attached to file) */
@@ -129,10 +171,27 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	MPI_Barrier(comm);
 	write_timing = MPI_Wtime();
 
-	/* write one variable at a time */
-	for (i=0; i<NUM_VARS; i++) {
+	/* write non-record variables, one variable at a time */
+	for (i=nrecords; i<NUM_VARS; i++) {
 		err = ncmpi_put_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
 		handle_error(err, __LINE__);
+	}
+	if (nrecords > 0) {
+		/* Loop over Records using 'len' records to make total variable size
+		 * the same as the non-record variables
+		 */
+		for (j=0; j<len; j++) {
+			/* write variable records, one variable at a time */
+			for (i=0; i<nrecords; i++) {
+				err = ncmpi_put_vara_int_all(ncid, varids[i], starts_rec, counts_rec, buf_rec[i]);
+				handle_error(err, __LINE__);
+			}
+			/* Make sure we go to the next record by incrementing start_rec[0] */
+			if(j<(len-1)) starts_rec[0]++;
+		}
+		//MPI_Offset testlen;
+		//err = ncmpi_inq_dimlen(ncid, dimids[0], &testlen); handle_error(err, __LINE__);
+		//printf("  Record-variable dimension size is now: %lld \n", testlen);
 	}
 
 	write_timing = MPI_Wtime() - write_timing;
@@ -142,7 +201,10 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	handle_error(err, __LINE__);
 
 	write_size = bufsize * NUM_VARS * sizeof(int);
-	for (i=0; i<NUM_VARS; i++) free(buf[i]);
+	for (i=0; i<NUM_VARS; i++) {
+		if (nrecords > 0) free(buf_rec[i]);
+		free(buf[i]);
+	}
 
 	MPI_Reduce(&write_size, &sum_write_size, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&write_timing, &max_write_timing, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
@@ -164,14 +226,18 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 }
 
 /* Use pNetCDF to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float fmult) {
+int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float fmult, int nrecords) {
 
 	char str[512];
 	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
-	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS], varids[NUM_VARS];
+	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS+1], varids[NUM_VARS];
 	double read_timing, max_read_timing, read_bw;
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset read_size, sum_read_size;
+
+	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
+	int psizes_rec[NDIMS];
+	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -185,21 +251,52 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	}
 
 	/* Get dimensions */
-	for (i=0; i<NDIMS; i++) {
-		sprintf(str, "%c", 'x'+i);
-		err = ncmpi_inq_dimid(ncid, str, &dimids[i]);
-		handle_error(err, __LINE__);
+	for (i=0; i<(NDIMS+1); i++) {
+		if (i==0) {
+			err = ncmpi_inq_dimid(ncid, "REC_DIM", &dimids[0]);
+			handle_error(err, __LINE__);
+		} else {
+			sprintf(str, "x%d", i);
+			err = ncmpi_inq_dimid(ncid, str, &dimids[i]);
+			handle_error(err, __LINE__);
+		}
 	}
 
 	/* Get variables */
 	for (i=0; i<NUM_VARS; i++) {
-		sprintf(str, "var%d", i);
-		err = ncmpi_inq_varid(ncid, str, &varids[i]);
-		handle_error(err, __LINE__);
+		if (i<nrecords) {
+			sprintf(str, "recvar%d", i);
+			err = ncmpi_inq_varid(ncid, str, &varids[i]);
+			handle_error(err, __LINE__);
+		} else {
+			sprintf(str, "var%d", i);
+			err = ncmpi_inq_varid(ncid, str, &varids[i]);
+			handle_error(err, __LINE__);
+		}
 	}
 
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
+
+	/* Setup record-variable layout (Each record is 2-Dimensional) */
+	if (nrecords > 0) {
+		for (i=0; i<NDIMS; i++)
+			psizes_rec[i] = 0;
+		MPI_Dims_create(nprocs, (NDIMS-1), &psizes_rec[1]);
+		starts_rec[1] = (rank / psizes_rec[2]) % psizes_rec[1];
+		starts_rec[2] = rank % psizes_rec[2];
+		psizes_rec[0] = 1;
+		starts_rec[0] = 0;
+		counts_rec[0] = len; /* Read all records at once */
+		for (i=1; i<NDIMS; i++) {
+			starts_rec[i] *= len;
+			counts_rec[i]  = len;
+		}
+
+		//for (j=0; j<NDIMS; j++)
+		//	printf(" (2) [%d] psizes_rec[%d] = %d, starts_rec[%d] = %lld, counts_rec[%d] = %lld\n", rank, j, psizes_rec[j], j, starts_rec[j], j, counts_rec[j]);
+
+	}
 
 	MPI_Dims_create(nprocs, NDIMS, psizes);
 	starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
@@ -220,23 +317,50 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 		for (j=0; j<bufsize; j++) buf[i][j] = -1;
 	}
 
+	if (collective==0) {
+		err = ncmpi_begin_indep_data(ncid);
+		handle_error(err, __LINE__);
+	}
 	MPI_Barrier(comm);
 	read_timing = MPI_Wtime();
 
 	/* write one variable at a time */
 	for (i=0; i<NUM_VARS; i++) {
-		//if (collective==1) {
-			/* read a subarray in collective mode */
-			err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
-			handle_error(err, __LINE__);
-		//} else {
-		//	/* read a subarray in independent mode */
-		//	err = ncmpi_get_vara_int(ncid, varids[1], starts, counts, buf[i]);
-		//	handle_error(err, __LINE__);
-		//}
+		if (collective==1) {
+			if (i<nrecords) {
+				/* read a subarray in collective mode */
+				err = ncmpi_get_vara_int_all(ncid, varids[i], starts_rec, counts_rec, buf[i]);
+				handle_error(err, __LINE__);
+			} else {
+				/* read a subarray in collective mode */
+				err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
+				handle_error(err, __LINE__);
+			}
+		} else {
+			if (i<nrecords) {
+
+				//for (j=0; j<NDIMS; j++)
+				//	printf("  [%d] starts_rec[%d] = %lld, counts_rec[%d] = %lld\n", rank, j, starts_rec[j], j, counts_rec[j]);
+				//MPI_Offset testlen;
+				//err = ncmpi_inq_dimlen(ncid, dimids[0], &testlen); handle_error(err, __LINE__);
+				//printf("  [%d] testlen = %lld \n", rank, testlen);
+
+				/* read a subarray in independent mode */
+				err = ncmpi_get_vara_int(ncid, varids[i], starts_rec, counts_rec, buf[i]);
+				handle_error(err, __LINE__);
+			} else {
+				/* read a subarray in independent mode */
+				err = ncmpi_get_vara_int(ncid, varids[i], starts, counts, buf[i]);
+				handle_error(err, __LINE__);
+			}
+		}
 	}
 
 	read_timing = MPI_Wtime() - read_timing;
+	if (collective==0) {
+		err = ncmpi_end_indep_data(ncid);
+		handle_error(err, __LINE__);
+	}
 
 	/* close the file */
 	err = ncmpi_close(ncid);
@@ -245,7 +369,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	/* Validation */
 	for (i=0; i<NUM_VARS; i++) {
 		for (j=0; j<bufsize; j++) {
-			if (buf[i][j] != (rank+1)*fmult) {
+			if (buf[i][j] != ((rank+1 + (i*1000))*fmult)) {
 				printf("ERROR!!! --- [%d] buf[%d][%d] = %d\n", rank, i, j, buf[i][j]);
 			}
 		}
@@ -276,7 +400,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 }
 
 /* Use HDF5 CDF VOL Connector to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all, int validate, int print_atts) {
+int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_all, int validate, int print_atts, int nrecords) {
 
 	hid_t file_id, dataspace_id, dxpl_plist_id;  /* identifiers */
 	hid_t int_dataset_id[NUM_VARS];
@@ -447,7 +571,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	if (validate) {
 		for(i=0; i<NUM_VARS; i++) {
 			for (j=0; j<hypersize; j++) {
-				if (data_out[i][j] != ((rank+1)*fmult)) {
+				if (data_out[i][j] != ((rank+1 + (i*1000))*fmult)) {
 					printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
 				}
 			}
@@ -540,6 +664,7 @@ int main(int argc, char **argv) {
 	int rm_file=1;
 	int validate=1;
 	int print_atts=0;
+	int nrecords=0;
 	char filestr1[1024]="";
 	char filestr2[1024]="";
 
@@ -561,6 +686,10 @@ int main(int argc, char **argv) {
 			validate = 0; /* Don't validate the data */
 		} else if (strcmp(argv[i],"--atts") == 0) {
 			print_atts = 1; /* Print Attributes */
+		} else if (strcmp(argv[i],"--nrecords") == 0) {
+			i++; nrecords = atoi(argv[i]); /* Write and read this many record variables */
+			if (nrecords < 0) nrecords = 0;
+			if (nrecords > NUM_VARS) nrecords = NUM_VARS;
 		} else {
 			printf("ERROR - unrecognized parameter: %s.  Exitting.\n",argv[i]);
 			exit(-1);
@@ -577,23 +706,23 @@ int main(int argc, char **argv) {
 
 	/* Write multi-dimensional dataset (1st time for pNetCDF timeing) */
 	pinfo = 1; fmult = 17;
-	write_cdf_col(MPI_COMM_WORLD, filestr2, cmode, dlen, fmult, pinfo);
+	write_cdf_col(MPI_COMM_WORLD, filestr2, cmode, dlen, fmult, pinfo, nrecords);
 
 	/* Write multi-dimensional dataset (2nd time for VOL timeing) */
-	pinfo = 0; fmult = 10;
-	write_cdf_col(MPI_COMM_WORLD, filestr1, cmode, dlen, fmult, pinfo);
+	//pinfo = 0; fmult = 10;
+	//write_cdf_col(MPI_COMM_WORLD, filestr1, cmode, dlen, fmult, pinfo, nrecords);
 
 	/* Read the multi-dimensional dataset (1st time for pNetCDF timeing) */
 	pinfo = 0; fmult = 17;
-	read_cdf_col(MPI_COMM_WORLD, filestr2, dlen, use_collective, fmult);
+	read_cdf_col(MPI_COMM_WORLD, filestr2, dlen, use_collective, fmult, nrecords);
 	MPI_Barrier(MPI_COMM_WORLD);
 
 
 	/* SECOND --> Using HDF5 for Reading... */
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
-	pinfo = 0; fmult = 10;
-	read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_all, validate, print_atts);
+	//pinfo = 0; fmult = 10;
+	//read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_all, validate, print_atts, nrecords);
 
 
 	/* Remove files */
@@ -603,8 +732,8 @@ int main(int argc, char **argv) {
 		handle_error(err, __LINE__);
 
 		/* Use PnetCDF to delete filestr1 */
-		err = ncmpi_delete( filestr1, MPI_INFO_NULL);
-		handle_error(err, __LINE__);
+		//err = ncmpi_delete( filestr1, MPI_INFO_NULL);
+		//handle_error(err, __LINE__);
 	}
 	MPI_Barrier(MPI_COMM_WORLD);
 
