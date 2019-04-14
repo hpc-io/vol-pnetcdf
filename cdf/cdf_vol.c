@@ -1034,8 +1034,7 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 
 		/* If this is a record variable, increment the stride between records */
 		if (vars[ivar].is_record == 1) {
-			H5VL_cdf_t *fileptr = (H5VL_cdf_t *) vars[ivar].file;
-			fileptr->record_stride += vars[ivar].vsize;
+			file->record_stride += vars[ivar].vsize;
 		}
 
 	}
@@ -1807,16 +1806,12 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	H5FD_mpio_xfer_t xfer_mode = H5FD_MPIO_INDEPENDENT;
 	MPI_Status mpi_status;
 	MPI_Datatype structtype;
+	MPI_Datatype vectype;
 #endif
 
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> In H5VL_cdf_dataset_read\n",file->rank, var->name->string);
 #endif
-
-	if (var->is_record == 1) {
-		printf("ERROR!!! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables\n",var->name->string);
-		return -1;
-	}
 
 	dataTypeSize = H5Tget_size(mem_type_id);
 	memSelType = H5S_SEL_ALL;
@@ -1848,8 +1843,9 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
 
-		if (var->is_record == 1) {
+		if (var->is_record == 0) {
 
+			/* Not a record variable -- Data is contiguous on disk */
 #ifdef H5_VOL_HAVE_PARALLEL
 			/* Use MPI-IO to read entire variable */
 			if (xfer_mode == H5FD_MPIO_COLLECTIVE)
@@ -1862,7 +1858,38 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 #endif
 
 		} else {
-			/* Add algorithm for record variables here (variable may not be stored contiguously) */
+
+			/* Record variable -- "Records" are contiguous on disk */
+			uint64_t recchunk_count = var->dimlens[0]; /* Treat every record as a "chunk" */
+			uint64_t recchunk_len = var->vsize;
+			uint64_t recchunk_stride = file->record_stride;
+#ifdef H5_VOL_HAVE_PARALLEL
+			MPI_Aint recchunk_off = (MPI_Aint)var->offset;
+#else
+			off_t recchunk_off = (off_t)var->offset;
+#endif
+			/* Combine into single chunk if there is only one record variable */
+			if (var->vsize == file->record_stride) {
+				recchunk_len = recchunk_len * recchunk_count;
+				recchunk_count = 1;
+			}
+#ifdef H5_VOL_HAVE_PARALLEL
+			MPI_Type_vector( (int)recchunk_count, recchunk_len, recchunk_stride, MPI_BYTE, &vectype );
+			MPI_Type_commit( &vectype );
+			MPI_File_set_view( file->fh, (MPI_Aint)0, MPI_BYTE, vectype, "native", MPI_INFO_NULL );
+			if (xfer_mode == H5FD_MPIO_COLLECTIVE)
+				MPI_File_read_all( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
+			else
+				MPI_File_read( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
+			MPI_Type_free(&vectype);
+#else
+			/* Use POSIX to read each record, one at a time */
+			off_t this_off = 0;
+			for (i=0; i<recchunk_count; i++) {
+				pread(file->fd, &charbuf[this_off], recchunk_len, (off_t)var->offset);
+				this_off += var->vsize;
+			}
+#endif
 
 		}
 
@@ -1874,6 +1901,11 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		}
 
 	} else if (h5selType == H5S_SEL_HYPERSLABS) {
+
+		if (var->is_record == 1) {
+			printf("WARNING! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables for hyperslab selections\n",var->name->string);
+		}
+
 		/* Generate arrays of flattened positions for each point in the selection.
 		 * The H5_posMap type will have an index (posCompact), and a position in
 		 * file or memory space (posInSource).  The position is the element index
