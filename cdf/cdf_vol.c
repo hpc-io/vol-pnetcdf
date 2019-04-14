@@ -172,6 +172,7 @@ static cdf_att_t *get_cdf_atts_t(H5VL_cdf_t* file, off_t *rdoff, cdf_non_neg_t n
 static void get_header_list_item(H5VL_cdf_t* file, off_t *rdoff, cdf_var_t* var);
 static herr_t cdf_read_header(H5VL_cdf_t* file);
 static herr_t cdf_cache_read(H5VL_cdf_t* file, off_t *rdoff, char *buf, MPI_Offset count);
+static herr_t cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *charbuf);
 
 /* "Management" callbacks */
 static herr_t H5VL_cdf_init(hid_t vipl_id);
@@ -1776,6 +1777,98 @@ H5VL_cdf_dataset_close(void *dset, hid_t dxpl_id, void **req) {
 }
 
 /*-------------------------------------------------------------------------
+ * Function:    cdf_select_all_read
+ *
+ * Purpose:     Helper funtion to read entire dataset/variable
+*
+ * Return:      Success:    Non-negative
+ *              Failure:    Negative
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *charbuf)
+{
+	herr_t ret_value=0;
+	int i;
+#ifdef H5_VOL_HAVE_PARALLEL
+	H5FD_mpio_xfer_t xfer_mode = H5FD_MPIO_INDEPENDENT;
+	MPI_Status mpi_status;
+	MPI_Datatype vectype;
+#endif
+
+#ifdef H5_VOL_HAVE_PARALLEL
+	H5Pget_dxpl_mpio(plist_id, &xfer_mode);
+#ifdef ENABLE_CDF_VERBOSE
+	printf("[%d] <%s> xfer_mode %d\n", file->rank, var->name->string, xfer_mode);
+#endif
+#endif
+
+#ifdef ENABLE_CDF_VERBOSE
+	printf("[%d] <%s> Reading %llu values for file offset %llu\n", file->rank, var->name->string, var->vsize, var->offset);
+	printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
+#endif
+
+	if (var->is_record == 0) {
+
+		/* Not a record variable -- Data is contiguous on disk */
+#ifdef H5_VOL_HAVE_PARALLEL
+		/* Use MPI-IO to read entire variable */
+		if (xfer_mode == H5FD_MPIO_COLLECTIVE)
+			MPI_File_read_at_all( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+		else
+			MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+#else
+		/* Use POSIX to read entire variable */
+		pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
+#endif
+
+	} else {
+
+		/* Record variable -- "Records" are contiguous on disk */
+		uint64_t recchunk_count = var->dimlens[0]; /* Treat every record as a "chunk" */
+		uint64_t recchunk_len = var->vsize;
+		uint64_t recchunk_stride = file->record_stride;
+#ifdef H5_VOL_HAVE_PARALLEL
+		MPI_Aint recchunk_off = (MPI_Aint)var->offset;
+#else
+		off_t recchunk_off = (off_t)var->offset;
+#endif
+		/* Combine into single chunk if there is only one record variable */
+		if (var->vsize == file->record_stride) {
+			recchunk_len = recchunk_len * recchunk_count;
+			recchunk_count = 1;
+		}
+#ifdef H5_VOL_HAVE_PARALLEL
+		MPI_Type_vector( (int)recchunk_count, recchunk_len, recchunk_stride, MPI_BYTE, &vectype );
+		MPI_Type_commit( &vectype );
+		MPI_File_set_view( file->fh, (MPI_Aint)0, MPI_BYTE, vectype, "native", MPI_INFO_NULL );
+		if (xfer_mode == H5FD_MPIO_COLLECTIVE)
+			MPI_File_read_all( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
+		else
+			MPI_File_read( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
+		MPI_Type_free(&vectype);
+#else
+		/* Use POSIX to read each record, one at a time */
+		off_t this_off = 0;
+		for (i=0; i<recchunk_count; i++) {
+			pread(file->fd, &charbuf[this_off], recchunk_len, (off_t)var->offset);
+			this_off += var->vsize;
+		}
+#endif
+
+	}
+
+	/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
+	if(LITTLE_ENDIAN_CDFVL) {
+		for (i=0; i<(var->vsize); i+=var->nc_type_size){
+			bytestr_rev(&charbuf[i],var->nc_type_size);
+		}
+	}
+
+	return ret_value;
+}
+
+/*-------------------------------------------------------------------------
  * Function:    H5VL_cdf_dataset_read
  *
  * Purpose:     Reads data from dataset through the VOL
@@ -1789,7 +1882,6 @@ static herr_t
 H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
                       hid_t file_space_id, hid_t plist_id, void *buf, void **req)
 {
-
 	herr_t ret_value=0;
 	cdf_var_t *var = (cdf_var_t *)dset; /* Cast dset to cdf_var_t */
 	H5VL_cdf_t *file = (H5VL_cdf_t *)(var->file); /* Get pointer to file object */
@@ -1829,79 +1921,19 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		return 0;
 	}
 
-#ifdef H5_VOL_HAVE_PARALLEL
-	H5Pget_dxpl_mpio(plist_id, &xfer_mode);
-#ifdef ENABLE_CDF_VERBOSE
-	printf("[%d] <%s> xfer_mode %d\n", file->rank, var->name->string, xfer_mode);
-#endif
-#endif
-
 	if (h5selType == H5S_SEL_ALL) {
 
-#ifdef ENABLE_CDF_VERBOSE
-		printf("[%d] <%s> Reading %llu values for file offset %llu\n", file->rank, var->name->string, var->vsize, var->offset);
-		printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
-#endif
-
-		if (var->is_record == 0) {
-
-			/* Not a record variable -- Data is contiguous on disk */
-#ifdef H5_VOL_HAVE_PARALLEL
-			/* Use MPI-IO to read entire variable */
-			if (xfer_mode == H5FD_MPIO_COLLECTIVE)
-				MPI_File_read_at_all( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
-			else
-				MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
-#else
-			/* Use POSIX to read entire variable */
-			pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
-#endif
-
-		} else {
-
-			/* Record variable -- "Records" are contiguous on disk */
-			uint64_t recchunk_count = var->dimlens[0]; /* Treat every record as a "chunk" */
-			uint64_t recchunk_len = var->vsize;
-			uint64_t recchunk_stride = file->record_stride;
-#ifdef H5_VOL_HAVE_PARALLEL
-			MPI_Aint recchunk_off = (MPI_Aint)var->offset;
-#else
-			off_t recchunk_off = (off_t)var->offset;
-#endif
-			/* Combine into single chunk if there is only one record variable */
-			if (var->vsize == file->record_stride) {
-				recchunk_len = recchunk_len * recchunk_count;
-				recchunk_count = 1;
-			}
-#ifdef H5_VOL_HAVE_PARALLEL
-			MPI_Type_vector( (int)recchunk_count, recchunk_len, recchunk_stride, MPI_BYTE, &vectype );
-			MPI_Type_commit( &vectype );
-			MPI_File_set_view( file->fh, (MPI_Aint)0, MPI_BYTE, vectype, "native", MPI_INFO_NULL );
-			if (xfer_mode == H5FD_MPIO_COLLECTIVE)
-				MPI_File_read_all( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
-			else
-				MPI_File_read( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
-			MPI_Type_free(&vectype);
-#else
-			/* Use POSIX to read each record, one at a time */
-			off_t this_off = 0;
-			for (i=0; i<recchunk_count; i++) {
-				pread(file->fd, &charbuf[this_off], recchunk_len, (off_t)var->offset);
-				this_off += var->vsize;
-			}
-#endif
-
-		}
-
-		/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
-		if(LITTLE_ENDIAN_CDFVL) {
-			for (i=0; i<(var->vsize); i+=var->nc_type_size){
-				bytestr_rev(&charbuf[i],var->nc_type_size);
-			}
-		}
+		if (cdf_select_all_read(var, file, plist_id, charbuf) < 0)
+			printf("ERROR!! cdf_select_all_read failed.");
 
 	} else if (h5selType == H5S_SEL_HYPERSLABS) {
 
+#ifdef H5_VOL_HAVE_PARALLEL
+		H5Pget_dxpl_mpio(plist_id, &xfer_mode);
+#ifdef ENABLE_CDF_VERBOSE
+		printf("[%d] <%s> xfer_mode %d\n", file->rank, var->name->string, xfer_mode);
+#endif
+#endif
 		if (var->is_record == 1) {
 			printf("WARNING! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables for hyperslab selections\n",var->name->string);
 		}
@@ -1942,7 +1974,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 				}
 			}
 
-		} else {
+		} else { /* The hyperslab selection is NOT the entire variable */
 
 			/* Hyperslab is a proper subset of elements - create block list */
 			nblocks_file = H5Sget_select_hyper_nblocks(file_space_id);
@@ -2046,7 +2078,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		free(targetSelOrderInC);
 
 	} else {
-		printf("ERROR!!! Only H5S_SEL_ALL available for now.\n");
+		printf("ERROR!!! Only H5S_SEL_ALL and H5S_SEL_HYPERSLABS available for now.\n");
 	}
 
 
