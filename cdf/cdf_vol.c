@@ -426,6 +426,10 @@ GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result) {
 	hsize_t mm[ndim];
 	getMultiplier(ndim, dims, mm);
 
+	for (n = 0; n < ndim; n++) {
+		printf("mm[%d] = %llu\n",n,mm[n]);
+	}
+
 	nblocks = H5Sget_select_hyper_nblocks(space_id);
 	total = H5Sget_select_npoints(space_id);
 	*result = (H5_posMap *)malloc(sizeof(H5_posMap) * (total + 1));
@@ -1934,9 +1938,6 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		printf("[%d] <%s> xfer_mode %d\n", file->rank, var->name->string, xfer_mode);
 #endif
 #endif
-		if (var->is_record == 1) {
-			printf("WARNING! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables for hyperslab selections\n",var->name->string);
-		}
 
 		/* Generate arrays of flattened positions for each point in the selection.
 		 * The H5_posMap type will have an index (posCompact), and a position in
@@ -1955,26 +1956,15 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 
 		if ((var->vsize) == (npoints * var->nc_type_size)) {
 
-			/* The hyperslab is actually the entire variable, read everything */
-#ifdef ENABLE_CDF_VERBOSE
-			printf("[%d] <%s> Reading %llu values for file offset %llu\n",file->rank,var->name->string,var->vsize, var->offset);
-			printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
-#endif
-#ifdef H5_VOL_HAVE_PARALLEL
-			/* Use MPI-IO to read entire variable */
-			MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
-#else
-			/* Use POSIX to read entire variable */
-			pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
-#endif
-			/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
-			if(LITTLE_ENDIAN_CDFVL) {
-				for (i=0; i<(var->vsize); i+=var->nc_type_size){
-					bytestr_rev(&charbuf[i],var->nc_type_size);
-				}
-			}
+			/* HS-Selection is same as entire variable */
+			if (cdf_select_all_read(var, file, plist_id, charbuf) < 0)
+				printf("ERROR!! cdf_select_all_read failed.");
 
 		} else { /* The hyperslab selection is NOT the entire variable */
+
+			if (var->is_record == 1) {
+				printf("WARNING! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables for (real) hyperslab selections.\n",var->name->string);
+			}
 
 			/* Hyperslab is a proper subset of elements - create block list */
 			nblocks_file = H5Sget_select_hyper_nblocks(file_space_id);
@@ -1999,10 +1989,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 				}
 			}
 
-			/* Allocate arrays to store the offset of each chunk
-			 * (Assume the selection will result in all chunks being the same length,
-			 * with the magnitude being the size in the 0th dimension)
-			 */
+			/* Allocate arrays to store the offset & type of each chunk */
 #ifdef H5_VOL_HAVE_PARALLEL
 			MPI_Aint *chunk_off = (MPI_Aint *) malloc (sizeof(MPI_Aint) * max_chunks);
 			MPI_Datatype *chunk_typ = (MPI_Datatype *) malloc (sizeof(MPI_Datatype) * max_chunks);

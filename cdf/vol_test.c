@@ -21,7 +21,7 @@
 
 #define NDIMS         3
 #define DIMLEN        2
-#define NUM_VARS      2
+#define NUM_VARS      1
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)
@@ -324,7 +324,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	MPI_Barrier(comm);
 	read_timing = MPI_Wtime();
 
-	/* write one variable at a time */
+	/* read one variable at a time */
 	for (i=0; i<NUM_VARS; i++) {
 		if (collective==1) {
 			if (i<nrecords) {
@@ -444,6 +444,10 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	char var_attr_data[13];
 	double read_bw;
 
+	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
+	int psizes_rec[NDIMS];
+	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
+
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
 	strcpy(connector_name,"cdf");
@@ -523,6 +527,20 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 
 	if (read_hyper) {
 
+		/* Setup record-variable layout (Each record is 2-Dimensional) */
+		if (nrecords > 0) {
+			for (i=0; i<NDIMS; i++)
+				psizes_rec[i] = 0;
+			MPI_Dims_create(nprocs, (NDIMS-1), &psizes_rec[1]);
+			starts_rec[1] = (rank / psizes_rec[2]) % psizes_rec[1];
+			starts_rec[2] = rank % psizes_rec[2];
+			psizes_rec[0] = 1;
+			starts_rec[0] = 0;
+			for (i=1; i<NDIMS; i++) {
+				starts_rec[i] *= len;
+			}
+		}
+
 		/* Use MPI_Dims_create to choose hyperslab decomposition */
 		for (i=0; i<NDIMS; i++)
 			psizes[i] = 0;
@@ -552,12 +570,31 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 			dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
 			status_n  = H5Sget_simple_extent_dims (dataspace[var_id], dims_out, NULL);
 
+			for (i=0; i<NDIMS; i++) {
+				printf (" dims_out[%d] = %llu\n",i, dims_out[i]);
+
+
+
+				/* DOES dimes_out[0] == 0 mean we need to add a way to querie the record-dimension ?? */
+
+
+
+				
+			}
+
 			/* Define hyperslab in the dataset. */
 			for (i=0; i<NDIMS; i++) {
-				block[i] = dims_out[i] / psizes[i];
-				stride[i] = block[i];
-				count[i] = 1;
-				offset[i] = starts[i] * block[i];
+				if (var_id < nrecords) {
+					block[i] = dims_out[i] / psizes_rec[i];
+					stride[i] = block[i];
+					count[i] = 1;
+					offset[i] = starts_rec[i] * block[i];
+				} else {
+					block[i] = dims_out[i] / psizes[i];
+					stride[i] = block[i];
+					count[i] = 1;
+					offset[i] = starts[i] * block[i];
+				}
 			}
 			status_h5 = H5Sselect_hyperslab (dataspace[var_id], H5S_SELECT_SET, offset, stride, count, block);
 
@@ -756,7 +793,7 @@ int main(int argc, char **argv) {
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
 	pinfo = 0; fmult = 10;
-	if (nrecords>0) read_hyper = 0;
+	//if (nrecords>0) read_hyper = 0;
 	read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_hyper, read_all, validate, print_atts, nrecords);
 
 
