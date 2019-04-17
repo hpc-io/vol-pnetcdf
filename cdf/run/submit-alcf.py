@@ -42,7 +42,7 @@ parser.add_argument("--machine", dest="machine", default=machine,
                     help="system name -- Available: theta, vesta, other [default="+machine+"]")
 parser.add_argument("--execname", dest="execname", default=execname,
                     help="Path to Exerciser executable [default="+execname+"]")
-parser.add_argument("--ppn", dest="ppn", type=int, default=ppn,
+parser.add_argument("--ppn", dest="ppn", type=int, default=ppn_in,
                     help="Processes to use per node [default="+str(ppn_in)+"]")
 parser.add_argument("--lfs_count", dest="lfs_count", type=int, default=lfs_count,
                     help="Lustre Stripe Count [default="+str(lfs_count)+"]")
@@ -169,7 +169,7 @@ with open(outdir+"/results."+jobid, "a") as outf:
 
     ntrials = 10
     run_all = False
-    dimlens = 64
+    dimlens = 48 #64
     use_double = False
     nranks = ppn * nodes_in
 
