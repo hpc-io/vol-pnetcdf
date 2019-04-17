@@ -572,14 +572,6 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 
 			for (i=0; i<NDIMS; i++) {
 				printf (" dims_out[%d] = %llu\n",i, dims_out[i]);
-
-
-
-				/* DOES dimes_out[0] == 0 mean we need to add a way to querie the record-dimension ?? */
-
-
-
-				
 			}
 
 			/* Define hyperslab in the dataset. */
@@ -613,6 +605,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 				offset_out[i] = 0;
 				hypersize *= block[i];
 			}
+			printf (" hypersize = %llu\n", hypersize);
 			read_size_hyper += hypersize * sizeof(int);
 			status_h5 = H5Sselect_hyperslab (memspace[var_id], H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
 
@@ -634,6 +627,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		if (validate) {
 			for(i=0; i<NUM_VARS; i++) {
 				for (j=0; j<hypersize; j++) {
+					printf("CHECK --> <%s> [%d] data_out[%d][%d] = %d\n", varname[i], rank, i, j, data_out[i][j]);
 					if (data_out[i][j] != ((rank+1 + (i*1000))*fmult)) {
 						printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
 						break;

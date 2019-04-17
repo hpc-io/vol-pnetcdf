@@ -20,8 +20,8 @@
 
 /* Whether to display log messages when callback is invoked */
 /* (Uncomment to enable) */
-//#define ENABLE_CDF_LOGGING
-//#define ENABLE_CDF_VERBOSE
+#define ENABLE_CDF_LOGGING
+#define ENABLE_CDF_VERBOSE
 #ifdef H5_HAVE_PARALLEL
 #define H5_VOL_HAVE_PARALLEL  /* Comment if you want to turn off MPI-IO */
 #endif
@@ -426,9 +426,9 @@ GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result) {
 	hsize_t mm[ndim];
 	getMultiplier(ndim, dims, mm);
 
-	for (n = 0; n < ndim; n++) {
-		printf("mm[%d] = %llu\n",n,mm[n]);
-	}
+	//for (n = 0; n < ndim; n++) {
+	//	printf("mm[%d] = %llu\n",n,mm[n]);
+	//}
 
 	nblocks = H5Sget_select_hyper_nblocks(space_id);
 	total = H5Sget_select_npoints(space_id);
@@ -1010,6 +1010,7 @@ get_cdf_vars_t(H5VL_cdf_t* file, off_t *rdoff) {
 #endif
 				if ((id==0) && (vars[ivar].dimlens[id]==0)) {
 					vars[ivar].is_record = 1;
+					vars[ivar].dimlens[0] = file->numrecs;
 				}
 			}
 
@@ -1751,6 +1752,12 @@ H5VL_cdf_dataset_get(void *obj, H5VL_dataset_get_t get_type, hid_t dxpl_id,
 	case H5VL_DATASET_GET_STORAGE_SIZE: {
 		hsize_t *ret = va_arg(arguments, hsize_t *);
 		*ret = (hsize_t)(var->vsize);
+		/* Need to multiply by the number of records for record variables */
+		if (var->is_record == 1) {
+			H5VL_cdf_t *fileptr = (H5VL_cdf_t *) var->file;
+			*ret = (hsize_t)((var->vsize) * (fileptr->numrecs));
+			//printf("numrecords = %llu\n",fileptr->numrecs);
+		}
 		//printf("H5VL_cdf_dataset_get -- var->vsize = %llu (*ret=%llu)\n",var->vsize,*ret);
 		break;
 	}
@@ -1794,6 +1801,7 @@ cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *char
 {
 	herr_t ret_value=0;
 	int i;
+	hsize_t varsize;
 #ifdef H5_VOL_HAVE_PARALLEL
 	H5FD_mpio_xfer_t xfer_mode = H5FD_MPIO_INDEPENDENT;
 	MPI_Status mpi_status;
@@ -1807,8 +1815,11 @@ cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *char
 #endif
 #endif
 
+	varsize = var->vsize;
+	if (var->is_record == 1) varsize *= file->numrecs;
+
 #ifdef ENABLE_CDF_VERBOSE
-	printf("[%d] <%s> Reading %llu values for file offset %llu\n", file->rank, var->name->string, var->vsize, var->offset);
+	printf("[%d] <%s> Reading %llu values for file offset %llu\n", file->rank, var->name->string, varsize, var->offset);
 	printf("[%d] <%s> nc_type_size = %d\n",file->rank,var->name->string,var->nc_type_size);
 #endif
 
@@ -1817,26 +1828,23 @@ cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *char
 		/* Not a record variable -- Data is contiguous on disk */
 #ifdef H5_VOL_HAVE_PARALLEL
 		/* Use MPI-IO to read entire variable */
+		MPI_File_set_view( file->fh, (MPI_Aint)0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL );
 		if (xfer_mode == H5FD_MPIO_COLLECTIVE)
-			MPI_File_read_at_all( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+			MPI_File_read_at_all( file->fh, var->offset, charbuf, varsize, MPI_BYTE, &mpi_status );
 		else
-			MPI_File_read_at( file->fh, var->offset, charbuf, (var->vsize) , MPI_BYTE, &mpi_status );
+			MPI_File_read_at( file->fh, var->offset, charbuf, varsize, MPI_BYTE, &mpi_status );
 #else
 		/* Use POSIX to read entire variable */
-		pread(file->fd, charbuf, var->vsize, (off_t)var->offset);
+		pread(file->fd, charbuf, varsize, (off_t)var->offset);
 #endif
 
 	} else {
 
 		/* Record variable -- "Records" are contiguous on disk */
-		uint64_t recchunk_count = var->dimlens[0]; /* Treat every record as a "chunk" */
+		uint64_t recchunk_count = file->numrecs; /* Treat every record as a "chunk" */
 		uint64_t recchunk_len = var->vsize;
 		uint64_t recchunk_stride = file->record_stride;
-#ifdef H5_VOL_HAVE_PARALLEL
-		MPI_Aint recchunk_off = (MPI_Aint)var->offset;
-#else
-		off_t recchunk_off = (off_t)var->offset;
-#endif
+
 		/* Combine into single chunk if there is only one record variable */
 		if (var->vsize == file->record_stride) {
 			recchunk_len = recchunk_len * recchunk_count;
@@ -1845,12 +1853,11 @@ cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *char
 #ifdef H5_VOL_HAVE_PARALLEL
 		MPI_Type_vector( (int)recchunk_count, recchunk_len, recchunk_stride, MPI_BYTE, &vectype );
 		MPI_Type_commit( &vectype );
-		MPI_File_set_view( file->fh, (MPI_Aint)0, MPI_BYTE, vectype, "native", MPI_INFO_NULL );
+		MPI_File_set_view( file->fh, (MPI_Aint)var->offset, MPI_BYTE, vectype, "native", MPI_INFO_NULL );
 		if (xfer_mode == H5FD_MPIO_COLLECTIVE)
 			MPI_File_read_all( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
 		else
 			MPI_File_read( file->fh, charbuf, (recchunk_count * recchunk_len), MPI_BYTE, &mpi_status );
-		MPI_Type_free(&vectype);
 #else
 		/* Use POSIX to read each record, one at a time */
 		off_t this_off = 0;
@@ -1864,7 +1871,7 @@ cdf_select_all_read(cdf_var_t *var, H5VL_cdf_t *file, hid_t plist_id, char *char
 
 	/* Swap bytes for each value (need to add rigorous test for "when" to do this) */
 	if(LITTLE_ENDIAN_CDFVL) {
-		for (i=0; i<(var->vsize); i+=var->nc_type_size){
+		for (i=0; i<varsize; i+=var->nc_type_size){
 			bytestr_rev(&charbuf[i],var->nc_type_size);
 		}
 	}
@@ -1898,6 +1905,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	int ndims, i, n;
 	H5_posMap *sourceSelOrderInC = NULL;
 	H5_posMap *targetSelOrderInC = NULL;
+	hsize_t varsize;
 #ifdef H5_VOL_HAVE_PARALLEL
 	H5FD_mpio_xfer_t xfer_mode = H5FD_MPIO_INDEPENDENT;
 	MPI_Status mpi_status;
@@ -1949,12 +1957,15 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 		npoints = H5Sget_select_npoints(file_space_id);
 		npoints_mem = H5Sget_select_npoints(mem_space_id);
 
+		varsize = var->vsize;
+		if (var->is_record == 1) varsize *= file->numrecs;
+
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> Hyperslab selection has %llu points.\n", file->rank, var->name->string, npoints);
-		printf("[%d] <%s> Variable size is %llu.\n", file->rank, var->name->string, var->vsize);
+		printf("[%d] <%s> Variable size is %llu.\n", file->rank, var->name->string, varsize);
 #endif
 
-		if ((var->vsize) == (npoints * var->nc_type_size)) {
+		if ((varsize) == (npoints * var->nc_type_size)) {
 
 			/* HS-Selection is same as entire variable */
 			if (cdf_select_all_read(var, file, plist_id, charbuf) < 0)
@@ -2025,6 +2036,11 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 			max_chunks = (chunk_ind+1);
 
 #ifdef H5_VOL_HAVE_PARALLEL
+
+			for (i = 0; i<max_chunks; i++) {
+				printf("chunk_off[%d]=%ld - chunk_len[%d]=%d\n", i, chunk_off[i], i, chunk_len[i]);
+			}
+
 			MPI_Type_create_struct( (int)max_chunks, chunk_len, chunk_off, chunk_typ, &structtype );
 			MPI_Type_commit( &structtype );
 			MPI_File_set_view( file->fh, var->offset, MPI_BYTE, structtype, "native", MPI_INFO_NULL );
@@ -2033,6 +2049,8 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 			else
 				MPI_File_read( file->fh, output_data, (npoints * var->nc_type_size), MPI_BYTE, &mpi_status );
 			MPI_Type_free(&structtype);
+
+
 #else
 			/* POSIX-based read (Just read one chunk at a time) */
 			uint64_t mem_ind = 0;
