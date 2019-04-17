@@ -516,10 +516,6 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 			dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
 			status_n  = H5Sget_simple_extent_dims (dataspace[var_id], dims_out, NULL);
 
-			for (i=0; i<NDIMS; i++) {
-				printf (" dims_out[%d] = %llu\n",i, dims_out[i]);
-			}
-
 			/* Define hyperslab in the dataset. */
 			for (i=0; i<NDIMS; i++) {
 				block[i] = dims_out[i] / psizes[i];
@@ -544,7 +540,6 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 				offset_out[i] = 0;
 				hypersize *= block[i];
 			}
-			printf (" hypersize = %llu\n", hypersize);
 			read_size_hyper += hypersize * sizeof(int);
 			status_h5 = H5Sselect_hyperslab (memspace[var_id], H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
 
@@ -566,7 +561,7 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		if (validate) {
 			for(i=0; i<NUM_VARS; i++) {
 				for (j=0; j<hypersize; j++) {
-					printf("CHECK --> <%s> [%d] data_out[%d][%d] = %d\n", varname[i], rank, i, j, data_out[i][j]);
+					//printf("CHECK --> <%s> [%d] data_out[%d][%d] = %d\n", varname[i], rank, i, j, data_out[i][j]);
 					if (data_out[i][j] != ((rank+1 + (i*1000))*fmult)) {
 						printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
 						break;
@@ -726,7 +721,6 @@ int main(int argc, char **argv) {
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
 	pinfo = 0; fmult = 10;
-	//if (nrecords>0) read_hyper = 0;
 	read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_hyper, read_all, validate, print_atts, nrecords);
 
 

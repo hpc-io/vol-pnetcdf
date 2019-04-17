@@ -20,8 +20,8 @@
 
 /* Whether to display log messages when callback is invoked */
 /* (Uncomment to enable) */
-#define ENABLE_CDF_LOGGING
-#define ENABLE_CDF_VERBOSE
+//#define ENABLE_CDF_LOGGING
+//#define ENABLE_CDF_VERBOSE
 #ifdef H5_HAVE_PARALLEL
 #define H5_VOL_HAVE_PARALLEL  /* Comment if you want to turn off MPI-IO */
 #endif
@@ -45,7 +45,7 @@ int cmpfuncWobble(const void *a, const void *b) {
 void traverseBlock(int ndim, int currDim, hsize_t *start, hsize_t *count, hsize_t *m, hsize_t previous, H5_posMap **result);
 void getMultiplier(int ndim, hsize_t *dims, hsize_t *result);
 void assignToMemSpace(H5_posMap *sourceSelOrderInC, H5_posMap *targetSelOrderInC, hsize_t npoints, size_t dataTypeSize, char *compactData, char *buf);
-static void GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result);
+static void GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result, hsize_t stride_ind0);
 
 /************/
 /* Typedefs */
@@ -406,7 +406,7 @@ void assignToMemSpace(H5_posMap *sourceSelOrderInC,
  *-------------------------------------------------------------------------
  */
 static void
-GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result) {
+GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result, hsize_t stride_ind0) {
 
 	int i, n, ndim;
 	hsize_t nblocks, total;
@@ -426,9 +426,14 @@ GetSelOrder(hid_t space_id, H5S_sel_type space_type, H5_posMap **result) {
 	hsize_t mm[ndim];
 	getMultiplier(ndim, dims, mm);
 
-	//for (n = 0; n < ndim; n++) {
-	//	printf("mm[%d] = %llu\n",n,mm[n]);
-	//}
+	/* Adjust the first dimension of the multiplier if this is a record variable */
+	if (stride_ind0 > 0) {
+		//printf("stride_ind0 = %llu\n",stride_ind0);
+		//for (n = 0; n < ndim; n++) {
+		//	printf("mm[%d] = %llu\n",n,mm[n]);
+		//}
+		mm[0] = stride_ind0;
+	}
 
 	nblocks = H5Sget_select_hyper_nblocks(space_id);
 	total = H5Sget_select_npoints(space_id);
@@ -1905,7 +1910,7 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 	int ndims, i, n;
 	H5_posMap *sourceSelOrderInC = NULL;
 	H5_posMap *targetSelOrderInC = NULL;
-	hsize_t varsize;
+	hsize_t varsize, stride_ind0;
 #ifdef H5_VOL_HAVE_PARALLEL
 	H5FD_mpio_xfer_t xfer_mode = H5FD_MPIO_INDEPENDENT;
 	MPI_Status mpi_status;
@@ -1947,18 +1952,23 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 #endif
 #endif
 
+		varsize = var->vsize;
+		stride_ind0 = (hsize_t)0;
+		if (var->is_record == 1) {
+			varsize *= file->numrecs;
+			stride_ind0 = (hsize_t) (file->record_stride / (var->nc_type_size));
+		}
+
 		/* Generate arrays of flattened positions for each point in the selection.
 		 * The H5_posMap type will have an index (posCompact), and a position in
 		 * file or memory space (posInSource).  The position is the element index
 		 * for a flattened representation of the selection.
 		 */
-		GetSelOrder(file_space_id, h5selType, &sourceSelOrderInC);
-		GetSelOrder(mem_space_id, memSelType, &targetSelOrderInC);
+		GetSelOrder(file_space_id, h5selType, &sourceSelOrderInC, stride_ind0);
+		GetSelOrder(mem_space_id, memSelType, &targetSelOrderInC, (hsize_t)0);
 		npoints = H5Sget_select_npoints(file_space_id);
 		npoints_mem = H5Sget_select_npoints(mem_space_id);
 
-		varsize = var->vsize;
-		if (var->is_record == 1) varsize *= file->numrecs;
 
 #ifdef ENABLE_CDF_VERBOSE
 		printf("[%d] <%s> Hyperslab selection has %llu points.\n", file->rank, var->name->string, npoints);
@@ -1973,9 +1983,9 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 
 		} else { /* The hyperslab selection is NOT the entire variable */
 
-			if (var->is_record == 1) {
-				printf("WARNING! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables for (real) hyperslab selections.\n",var->name->string);
-			}
+			//if (var->is_record == 1) {
+			//	printf("WARNING! <%s> is a record variable, and H5VL_cdf_dataset_read only supports non-record variables for (real) hyperslab selections.\n",var->name->string);
+			//}
 
 			/* Hyperslab is a proper subset of elements - create block list */
 			nblocks_file = H5Sget_select_hyper_nblocks(file_space_id);
@@ -2037,10 +2047,6 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 
 #ifdef H5_VOL_HAVE_PARALLEL
 
-			for (i = 0; i<max_chunks; i++) {
-				printf("chunk_off[%d]=%ld - chunk_len[%d]=%d\n", i, chunk_off[i], i, chunk_len[i]);
-			}
-
 			MPI_Type_create_struct( (int)max_chunks, chunk_len, chunk_off, chunk_typ, &structtype );
 			MPI_Type_commit( &structtype );
 			MPI_File_set_view( file->fh, var->offset, MPI_BYTE, structtype, "native", MPI_INFO_NULL );
@@ -2049,7 +2055,6 @@ H5VL_cdf_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_space_id,
 			else
 				MPI_File_read( file->fh, output_data, (npoints * var->nc_type_size), MPI_BYTE, &mpi_status );
 			MPI_Type_free(&structtype);
-
 
 #else
 			/* POSIX-based read (Just read one chunk at a time) */
