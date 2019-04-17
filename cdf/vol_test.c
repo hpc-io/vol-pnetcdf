@@ -21,7 +21,7 @@
 
 #define NDIMS         3
 #define DIMLEN        2
-#define NUM_VARS      2
+#define NUM_VARS      10
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)
@@ -53,11 +53,13 @@ static void print_info(MPI_Info *info_used)
 }
 
 /* Use pNetCDF to write NDIMS-dimensional datasets to a test file */
-int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, int pinfo, int nrecords) {
+int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, int pinfo, int nrecords, int use_doubles) {
 
 	char str[512];
 	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
-	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS], varids[NUM_VARS];
+	int *buf_int[NUM_VARS];
+	double *buf_dbl[NUM_VARS];
+	int psizes[NDIMS], dimids[NDIMS], varids[NUM_VARS];
 	double write_timing, max_write_timing, write_bw;
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset write_size, sum_write_size;
@@ -66,10 +68,11 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	char varattrbuf[13] = "Hello Var01\n";
 
 	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
-	int *buf_rec[NUM_VARS], psizes_rec[NDIMS];
+	int *buf_rec_int[NUM_VARS];
+	double *buf_rec_dbl[NUM_VARS];
+	int psizes_rec[NDIMS];
 	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
 	int dimids_rec[NDIMS];
-
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -93,8 +96,13 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 		}
 		/* allocate buffer and initialize with non-zero numbers */
 		for (i=0; i<NUM_VARS; i++) {
-			buf_rec[i] = (int *) malloc(bufsize * sizeof(int));
-			for (j=0; j<bufsize; j++) buf_rec[i][j] = (rank+1 + (i*1000))*fmult;
+			if (use_doubles) {
+				buf_rec_dbl[i] = (double *) malloc(bufsize * sizeof(double));
+				for (j=0; j<bufsize; j++) buf_rec_dbl[i][j] = (double)(rank+1 + (i*1000))*fmult;
+			} else {
+				buf_rec_int[i] = (int *) malloc(bufsize * sizeof(int));
+				for (j=0; j<bufsize; j++) buf_rec_int[i][j] = (rank+1 + (i*1000))*fmult;
+			}
 		}
 	}
 
@@ -109,15 +117,19 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	bufsize = 1;
 	for (i=0; i<NDIMS; i++) {
 		gsizes[i] = (MPI_Offset)len * psizes[i];
-		//printf("gsizes[%d] = %lld\n",i,gsizes[i]);
 		starts[i] *= len;
 		counts[i]  = len;
 		bufsize   *= len;
 	}
 	/* allocate buffer and initialize with non-zero numbers */
 	for (i=0; i<NUM_VARS; i++) {
-		buf[i] = (int *) malloc(bufsize * sizeof(int));
-		for (j=0; j<bufsize; j++) buf[i][j] = (rank+1 + (i*1000))*fmult;
+		if (use_doubles) {
+			buf_dbl[i] = (double *) malloc(bufsize * sizeof(double));
+			for (j=0; j<bufsize; j++) buf_dbl[i][j] = (double)(rank+1 + (i*1000))*fmult;
+		} else {
+			buf_int[i] = (int *) malloc(bufsize * sizeof(int));
+			for (j=0; j<bufsize; j++) buf_int[i][j] = (rank+1 + (i*1000))*fmult;
+		}
 	}
 
 	/* create the file */
@@ -149,11 +161,17 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	for (i=0; i<NUM_VARS; i++) {
 		if (i<nrecords) {
 			sprintf(str, "recvar%d", i);
-			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids_rec, &varids[i]);
+			if (use_doubles)
+				err = ncmpi_def_var(ncid, str, NC_DOUBLE, NDIMS, dimids_rec, &varids[i]);
+			else
+				err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids_rec, &varids[i]);
 			handle_error(err, __LINE__);
 		} else {
 			sprintf(str, "var%d", i);
-			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids, &varids[i]);
+			if (use_doubles)
+				err = ncmpi_def_var(ncid, str, NC_DOUBLE, NDIMS, dimids, &varids[i]);
+			else
+				err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids, &varids[i]);
 			handle_error(err, __LINE__);
 		}
 	}
@@ -177,8 +195,13 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 
 	/* write non-record variables, one variable at a time */
 	for (i=nrecords; i<NUM_VARS; i++) {
-		err = ncmpi_put_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
-		handle_error(err, __LINE__);
+		if (use_doubles) {
+			err = ncmpi_put_vara_double_all(ncid, varids[i], starts, counts, buf_dbl[i]);
+			handle_error(err, __LINE__);
+		} else {
+			err = ncmpi_put_vara_int_all(ncid, varids[i], starts, counts, buf_int[i]);
+			handle_error(err, __LINE__);
+		}
 	}
 	if (nrecords > 0) {
 		/* Loop over Records using 'len' records to make total variable size
@@ -187,8 +210,13 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 		for (j=0; j<len; j++) {
 			/* write variable records, one variable at a time */
 			for (i=0; i<nrecords; i++) {
-				err = ncmpi_put_vara_int_all(ncid, varids[i], starts_rec, counts_rec, buf_rec[i]);
-				handle_error(err, __LINE__);
+				if (use_doubles) {
+					err = ncmpi_put_vara_double_all(ncid, varids[i], starts_rec, counts_rec, buf_rec_dbl[i]);
+					handle_error(err, __LINE__);
+				} else {
+					err = ncmpi_put_vara_int_all(ncid, varids[i], starts_rec, counts_rec, buf_rec_int[i]);
+					handle_error(err, __LINE__);
+				}
 			}
 			/* Make sure we go to the next record by incrementing start_rec[0] */
 			if(j<(len-1)) starts_rec[0]++;
@@ -200,21 +228,28 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 
 	write_timing = MPI_Wtime() - write_timing;
 
-	/* close the file */
+	/* close the file and clean up */
 	err = ncmpi_close(ncid);
 	handle_error(err, __LINE__);
-
-	write_size = bufsize * NUM_VARS * sizeof(int);
+	if (use_doubles) write_size = bufsize * NUM_VARS * sizeof(double);
+	else             write_size = bufsize * NUM_VARS * sizeof(int);
 	for (i=0; i<NUM_VARS; i++) {
-		if (nrecords > 0) free(buf_rec[i]);
-		free(buf[i]);
+		if (use_doubles) {
+			if (nrecords > 0) free(buf_rec_dbl[i]);
+			free(buf_dbl[i]);
+		}else {
+			if (nrecords > 0) free(buf_rec_int[i]);
+			free(buf_int[i]);
+		}
 	}
 
 	MPI_Reduce(&write_size, &sum_write_size, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&write_timing, &max_write_timing, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
 
 	if ((rank == 0) && (pinfo==1) && 0) {
-		float subarray_size = (float)bufsize*sizeof(int)/1048576.0;
+		float subarray_size;
+		if (use_doubles) subarray_size = (float)bufsize*sizeof(double)/1048576.0;
+		else             subarray_size = (float)bufsize*sizeof(int)/1048576.0;
 		print_info(&info_used);
 		printf("Local array size %d x %d x %d integers, size = %.2f MB\n",len,len,len,subarray_size);
 		sum_write_size /= 1048576.0;
@@ -224,17 +259,21 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 		printf("-------  ------------------  ---------  -----------\n");
 		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_write_timing, write_bw);
 	}
+	if ((rank==0)  && (pinfo==1) && use_doubles) printf("Using DOUBLE-Precision Arrays.\n");
+	if ((rank==0)  && (pinfo==1) && (!use_doubles)) printf("Using Integer Arrays.\n");
 	MPI_Info_free(&info_used);
 
 	return nerrs;
 }
 
 /* Use pNetCDF to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float fmult, int nrecords) {
+int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float fmult, int nrecords, int use_doubles) {
 
 	char str[512];
 	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
-	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS+1], varids[NUM_VARS];
+	int *buf_int[NUM_VARS];
+	double *buf_dbl[NUM_VARS];
+	int psizes[NDIMS], dimids[NDIMS+1], varids[NUM_VARS];
 	double read_timing, max_read_timing, read_bw;
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset read_size, sum_read_size;
@@ -295,8 +334,13 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 
 	/* allocate buffer and initialize */
 	for (i=0; i<NUM_VARS; i++) {
-		buf[i] = (int *) malloc(bufsize * sizeof(int));
-		for (j=0; j<bufsize; j++) buf[i][j] = -1;
+		if (use_doubles) {
+			buf_dbl[i] = (double *) malloc(bufsize * sizeof(double));
+			for (j=0; j<bufsize; j++) buf_dbl[i][j] = -1.0;
+		} else {
+			buf_int[i] = (int *) malloc(bufsize * sizeof(int));
+			for (j=0; j<bufsize; j++) buf_int[i][j] = -1;
+		}
 	}
 
 	if (collective==0) {
@@ -310,12 +354,22 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	for (i=0; i<NUM_VARS; i++) {
 		if (collective==1) {
 			/* read a subarray in collective mode */
-			err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
-			handle_error(err, __LINE__);
+			if (use_doubles) {
+				err = ncmpi_get_vara_double_all(ncid, varids[i], starts, counts, buf_dbl[i]);
+				handle_error(err, __LINE__);
+			} else {
+				err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf_int[i]);
+				handle_error(err, __LINE__);
+			}
 		} else {
 			/* read a subarray in independent mode */
-			err = ncmpi_get_vara_int(ncid, varids[i], starts, counts, buf[i]);
-			handle_error(err, __LINE__);
+			if (use_doubles) {
+				err = ncmpi_get_vara_double(ncid, varids[i], starts, counts, buf_dbl[i]);
+				handle_error(err, __LINE__);
+			} else {
+				err = ncmpi_get_vara_int(ncid, varids[i], starts, counts, buf_int[i]);
+				handle_error(err, __LINE__);
+			}
 		}
 	}
 
@@ -332,29 +386,31 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	/* Validation */
 	for (i=0; i<NUM_VARS; i++) {
 		for (j=0; j<bufsize; j++) {
-			if (buf[i][j] != ((rank+1 + (i*1000))*fmult)) {
-				printf("PNETCDF ERROR!!! --- [%d] buf[%d][%d] = %d\n", rank, i, j, buf[i][j]);
-				break;
+			if (use_doubles) {
+				if (buf_dbl[i][j] != (double)((rank+1 + (i*1000))*fmult)) {
+					printf("PNETCDF ERROR!!! --- [%d] buf[%d][%d] = %f\n", rank, i, j, buf_dbl[i][j]);
+					break;
+				}
+			} else {
+				if (buf_int[i][j] != ((rank+1 + (i*1000))*fmult)) {
+					printf("PNETCDF ERROR!!! --- [%d] buf[%d][%d] = %d\n", rank, i, j, buf_int[i][j]);
+					break;
+				}
 			}
 		}
 	}
 
-	read_size = bufsize * NUM_VARS * sizeof(int);
-	for (i=0; i<NUM_VARS; i++) free(buf[i]);
+	if (use_doubles) {
+		read_size = bufsize * NUM_VARS * sizeof(double);
+		for (i=0; i<NUM_VARS; i++) free(buf_dbl[i]);
+	} else {
+		read_size = bufsize * NUM_VARS * sizeof(int);
+		for (i=0; i<NUM_VARS; i++) free(buf_int[i]);
+	}
 
 	MPI_Reduce(&read_size, &sum_read_size, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 	MPI_Reduce(&read_timing, &max_read_timing, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
 
-	if (rank == 0 && 0) {
-		float subarray_size = (float)bufsize*sizeof(int)/1048576.0;
-		//printf("Local array size %d x %d x %d integers, size = %.2f MB\n",len,len,len,subarray_size);
-		sum_read_size /= 1048576.0;
-		//printf("Global array size %lld x %lld x %lld integers, read size = %.2f GB\n", gsizes[0], gsizes[1], gsizes[2], sum_read_size/1024.0);
-		read_bw = sum_read_size/max_read_timing;
-		printf(" procs    Global array size  exec(sec)  read(MB/s)\n");
-		printf("-------  ------------------  ---------  -----------\n");
-		printf(" %4d    %4lld x %4lld x %4lld %8.3f  %10.3f\n\n", nprocs, gsizes[0], gsizes[1], gsizes[2], max_read_timing, read_bw);
-	}
 	if (rank == 0) {
 		sum_read_size /= 1048576.0;
 		printf("  CDF_READ_HYPER: size[MB]=%lld time[s]=%f bandwidth[MB/s]=%f\n", sum_read_size, max_read_timing, sum_read_size/max_read_timing);
@@ -364,10 +420,10 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 }
 
 /* Use HDF5 CDF VOL Connector to READ NDIMS-dimensional datasets from a test file */
-int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_hyper, int read_all, int validate, int print_atts, int nrecords) {
+int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int fmult, int read_hyper, int read_all, int validate, int print_atts, int nrecords, int use_doubles) {
 
 	hid_t file_id, dataspace_id, dxpl_plist_id;  /* identifiers */
-	hid_t int_dataset_id[NUM_VARS];
+	hid_t dataset_id[NUM_VARS];
 	hsize_t dims[2];
 	herr_t status;
 	char connector_name[25];
@@ -376,7 +432,8 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	hid_t vol_id;
 	char name[25];
 	hsize_t bytecnt;
-	int *data_out[NUM_VARS];
+	int *data_out_int[NUM_VARS];
+	double *data_out_dbl[NUM_VARS];
 	int *dset_data_int;
 	double *dset_data_dbl;
 	int nprocs, rank, i, j, v, err, nerrs=0;
@@ -471,17 +528,22 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	if (read_all) {
 		/* Read 3D integer dataset (H5S_ALL) */
 		var_id = 0;
-		int_dataset_id[var_id] = H5Dopen(file_id, varname[var_id], H5P_DEFAULT);
-		bytecnt = H5Dget_storage_size(int_dataset_id[var_id]);
-		dset_data_int = (int *) malloc( bytecnt );
+		dataset_id[var_id] = H5Dopen(file_id, varname[var_id], H5P_DEFAULT);
+		bytecnt = H5Dget_storage_size(dataset_id[var_id]);
+		if (use_doubles) dset_data_int = (int *) malloc( bytecnt );
+		else             dset_data_dbl = (double *) malloc( bytecnt );
 		read_time_all = MPI_Wtime();
-		status = H5Dread(int_dataset_id[var_id], H5T_NATIVE_INT, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_int);
+		if (use_doubles)
+			status = H5Dread(dataset_id[var_id], H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_dbl);
+		else
+			status = H5Dread(dataset_id[var_id], H5T_NATIVE_INT, H5S_ALL, H5S_ALL, dxpl_plist_id, dset_data_int);
 		read_time_all = MPI_Wtime() - read_time_all;
 		read_size_all = bytecnt;
 		MPI_Reduce(&read_size_all, &sum_read_size_all, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
 		MPI_Reduce(&read_time_all, &max_read_time_all, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
-		H5Dclose(int_dataset_id[var_id]);
-		free(dset_data_int);
+		H5Dclose(dataset_id[var_id]);
+		if (use_doubles) free(dset_data_int);
+		else             free(dset_data_dbl);
 	}
 
 	if (read_hyper) {
@@ -501,8 +563,13 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 
 		/* Allocate data_out */
 		for (i=0; i<NUM_VARS; i++) {
-			data_out[i] = (int *) malloc(hypersize * sizeof(int));
-			for (j=0; j<hypersize; j++) data_out[i][j] = -1;
+			if (use_doubles) {
+				data_out_dbl[i] = (double *) malloc(hypersize * sizeof(double));
+				for (j=0; j<hypersize; j++) data_out_dbl[i][j] = -1.0;
+			} else {
+				data_out_int[i] = (int *) malloc(hypersize * sizeof(int));
+				for (j=0; j<hypersize; j++) data_out_int[i][j] = -1;
+			}
 		}
 
 		/* Open all variables and define hyperslab selections */
@@ -510,8 +577,8 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		for(var_id=0; var_id<NUM_VARS; var_id++) {
 
 			/* Read simple hyperslab selection from var1 */
-			int_dataset_id[var_id] = H5Dopen(file_id, varname[var_id], H5P_DEFAULT);
-			dataspace[var_id] = H5Dget_space (int_dataset_id[var_id]);    /* dataspace handle */
+			dataset_id[var_id] = H5Dopen(file_id, varname[var_id], H5P_DEFAULT);
+			dataspace[var_id] = H5Dget_space (dataset_id[var_id]);    /* dataspace handle */
 			dimrank  = H5Sget_simple_extent_ndims (dataspace[var_id]);
 			dims_out = (hsize_t *) malloc( dimrank * sizeof(hsize_t) );
 			status_n  = H5Sget_simple_extent_dims (dataspace[var_id], dims_out, NULL);
@@ -540,7 +607,8 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 				offset_out[i] = 0;
 				hypersize *= block[i];
 			}
-			read_size_hyper += hypersize * sizeof(int);
+			if (use_doubles) read_size_hyper += hypersize * sizeof(double);
+			else             read_size_hyper += hypersize * sizeof(int);
 			status_h5 = H5Sselect_hyperslab (memspace[var_id], H5S_SELECT_SET, offset_out, stride_out, count_out, block_out);
 
 		}
@@ -551,7 +619,10 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		 */
 		read_time_hyper = MPI_Wtime();
 		for(var_id=0; var_id<NUM_VARS; var_id++) {
-			status_h5 = H5Dread (int_dataset_id[var_id], H5T_NATIVE_INT, memspace[var_id], dataspace[var_id], dxpl_plist_id, data_out[var_id]);
+			if (use_doubles)
+				status_h5 = H5Dread (dataset_id[var_id], H5T_NATIVE_DOUBLE, memspace[var_id], dataspace[var_id], dxpl_plist_id, data_out_dbl[var_id]);
+			else
+				status_h5 = H5Dread (dataset_id[var_id], H5T_NATIVE_INT, memspace[var_id], dataspace[var_id], dxpl_plist_id, data_out_int[var_id]);
 		}
 		read_time_hyper = MPI_Wtime() - read_time_hyper;
 
@@ -562,15 +633,25 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 			for(i=0; i<NUM_VARS; i++) {
 				for (j=0; j<hypersize; j++) {
 					//printf("CHECK --> <%s> [%d] data_out[%d][%d] = %d\n", varname[i], rank, i, j, data_out[i][j]);
-					if (data_out[i][j] != ((rank+1 + (i*1000))*fmult)) {
-						printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out[i][j]);
-						break;
+					if (use_doubles) {
+						if (data_out_dbl[i][j] != (double)((rank+1 + (i*1000))*fmult)) {
+							printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %f\n", rank, i, j, data_out_dbl[i][j]);
+							break;
+						}
+					} else {
+						if (data_out_int[i][j] != ((rank+1 + (i*1000))*fmult)) {
+							printf("ERROR!!! ~~~ [%d] data_out[%d][%d] = %d\n", rank, i, j, data_out_int[i][j]);
+							break;
+						}
 					}
 				}
 			}
 		}
 		free(dims_out);
-		for (i=0; i<NUM_VARS; i++) free(data_out[i]);
+		if (use_doubles)
+			for (i=0; i<NUM_VARS; i++) free(data_out_dbl[i]);
+		else
+			for (i=0; i<NUM_VARS; i++) free(data_out_int[i]);
 
 		/* Also want global and variable attributes */
 		natts_check=0;
@@ -597,11 +678,11 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 		/* Read Attributes */
 		attr1 = H5Aopen_name (file_id, attname[0]);
 		H5Aread(attr1, H5T_NATIVE_CHAR, attr_data);
-		attr2 = H5Aopen_name (int_dataset_id[var_id], var_attname[0]);
+		attr2 = H5Aopen_name (dataset_id[var_id], var_attname[0]);
 		H5Aread(attr2, H5T_NATIVE_CHAR, var_attr_data);
 
 		/* Cleanup */
-		for (i=0; i<NUM_VARS; i++) H5Dclose(int_dataset_id[i]);
+		for (i=0; i<NUM_VARS; i++) H5Dclose(dataset_id[i]);
 		H5Aclose(attr1);
 		H5Aclose(attr2);
 	}
@@ -664,6 +745,7 @@ int main(int argc, char **argv) {
 	int print_atts=0;
 	int nrecords=0;
 	int read_hyper=1;
+	int use_doubles=0;
 	char filestr1[1024]="";
 	char filestr2[1024]="";
 
@@ -685,6 +767,8 @@ int main(int argc, char **argv) {
 			validate = 0; /* Don't validate the data */
 		} else if (strcmp(argv[i],"--atts") == 0) {
 			print_atts = 1; /* Print Attributes */
+		} else if (strcmp(argv[i],"--double") == 0) {
+			use_doubles = 1; /* Use double-precision datasets */
 		} else if (strcmp(argv[i],"--nrecords") == 0) {
 			i++; nrecords = atoi(argv[i]); /* Write and read this many record variables */
 			if (nrecords < 0) nrecords = 0;
@@ -705,15 +789,15 @@ int main(int argc, char **argv) {
 
 	/* Write multi-dimensional dataset (1st time for pNetCDF timeing) */
 	pinfo = 1; fmult = 17;
-	write_cdf_col(MPI_COMM_WORLD, filestr2, cmode, dlen, fmult, pinfo, nrecords);
+	write_cdf_col(MPI_COMM_WORLD, filestr2, cmode, dlen, fmult, pinfo, nrecords, use_doubles);
 
 	/* Write multi-dimensional dataset (2nd time for VOL timeing) */
 	pinfo = 0; fmult = 10;
-	write_cdf_col(MPI_COMM_WORLD, filestr1, cmode, dlen, fmult, pinfo, nrecords);
+	write_cdf_col(MPI_COMM_WORLD, filestr1, cmode, dlen, fmult, pinfo, nrecords, use_doubles);
 
 	/* Read the multi-dimensional dataset (1st time for pNetCDF timeing) */
 	pinfo = 0; fmult = 17;
-	read_cdf_col(MPI_COMM_WORLD, filestr2, dlen, use_collective, fmult, nrecords);
+	read_cdf_col(MPI_COMM_WORLD, filestr2, dlen, use_collective, fmult, nrecords, use_doubles);
 	MPI_Barrier(MPI_COMM_WORLD);
 
 
@@ -721,7 +805,7 @@ int main(int argc, char **argv) {
 
 	/* Read the multi-dimensional dataset (2nd time for VOL timeing) */
 	pinfo = 0; fmult = 10;
-	read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_hyper, read_all, validate, print_atts, nrecords);
+	read_cdf_vol(MPI_COMM_WORLD, filestr1, dlen, use_collective, fmult, read_hyper, read_all, validate, print_atts, nrecords, use_doubles);
 
 
 	/* Remove files */
