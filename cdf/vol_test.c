@@ -21,7 +21,7 @@
 
 #define NDIMS         3
 #define DIMLEN        2
-#define NUM_VARS      10
+#define NUM_VARS      2
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)

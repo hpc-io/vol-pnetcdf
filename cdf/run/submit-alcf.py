@@ -11,21 +11,22 @@ import os
 import sys
 print("Using Python version: "+str(sys.version_info[0]))
 
-# Machine Specific
+# THETA DEFAULT
 machine   = "theta"
 srcroot   = "/home/zamora/hdf5_root_dir/xgitlabrepos/pnetcdf_vol"
 fsroot    = "/lus/theta-fs0/projects/datascience/rzamora"
 ppn_in    = 32
 nranksmin = 1024
 
+# Rick's Mac DEFAULT
 machine   = "other"
 srcroot   = "/Users/rzamora/IO/CCIO/xgitlabrepos/pnetcdf_vol"
 fsroot    = "/Users/rzamora/IO/CCIO/xgitlabrepos/pnetcdf_vol/scratch"
 ppn       = 2
-nranksmin = 2
+nranksmin = 1
 
 # Important Benchmarking Settings
-benchname = "hdf5-cdfvl-20190904"
+benchname = "hdf5-cdfvl-20190417"
 runroot   = fsroot + "/benchscratch"
 benchroot = srcroot + "/cdf"
 outroot   = benchroot + "/run/results/" + benchname
@@ -47,8 +48,6 @@ parser.add_argument("--lfs_count", dest="lfs_count", type=int, default=lfs_count
                     help="Lustre Stripe Count [default="+str(lfs_count)+"]")
 parser.add_argument("--lfs_size", dest="lfs_size", type=int, default=lfs_size,
                     help="Lustre Stripe Size (Units=MB) [default="+str(lfs_size)+"]")
-#parser.add_argument("--ccio", dest="ccio", action="store_true", default=ccio,
-#                    help="Using the CCIO version of HDF5 (Set CCIO Env Vars) [default="+str(ccio)+"]")
 args = parser.parse_args()
 machine   = args.machine
 execname  = args.execname
@@ -171,6 +170,7 @@ with open(outdir+"/results."+jobid, "a") as outf:
     ntrials = 10
     run_all = False
     dimlens = 64
+    use_double = False
     nranks = ppn * nodes_in
 
     while nranks >= nranksmin:
@@ -182,6 +182,7 @@ with open(outdir+"/results."+jobid, "a") as outf:
             envs = [ ]
             cmd = list( get_runjob_cmd( envs, nranks, ppn ) );
             cmd.append("--dimlen"); cmd.append(str(dimlens));
+            if use_double: cmd.append("--double");
             if run_all: cmd.append("--all");
             if nocheck: cmd.append("--nocheck");
             print_cmd(cmd)
@@ -195,6 +196,36 @@ with open(outdir+"/results."+jobid, "a") as outf:
             cmd = list( get_runjob_cmd( envs, nranks, ppn ) );
             cmd.append("--dimlen"); cmd.append(str(dimlens));
             cmd.append("--col");
+            if use_double: cmd.append("--double")
+            if run_all: cmd.append("--all");
+            if nocheck: cmd.append("--nocheck");
+            print_cmd(cmd)
+            subprocess.call(cmd, stdout=outf)
+
+        # Independent I/O - Record Variables
+        subprocess.call(["echo",""], stdout=outf)
+        subprocess.call(["echo","[Independent-Records]: "+str(nranks)+" procs"], stdout=outf)
+        for itrial in range(ntrials):
+            envs = [ ]
+            cmd = list( get_runjob_cmd( envs, nranks, ppn ) );
+            cmd.append("--dimlen"); cmd.append(str(dimlens));
+            cmd.append("--nrecords"); cmd.append(str(100)) # Overestimate to make all vars records
+            if use_double: cmd.append("--double")
+            if run_all: cmd.append("--all");
+            if nocheck: cmd.append("--nocheck");
+            print_cmd(cmd)
+            subprocess.call(cmd, stdout=outf)
+
+        # Collective I/O - Record Variables
+        subprocess.call(["echo",""], stdout=outf)
+        subprocess.call(["echo","[Collective-Records]: "+str(nranks)+" procs"], stdout=outf)
+        for itrial in range(ntrials):
+            envs = [ ]
+            cmd = list( get_runjob_cmd( envs, nranks, ppn ) );
+            cmd.append("--dimlen"); cmd.append(str(dimlens));
+            cmd.append("--nrecords"); cmd.append(str(100)) # Overestimate to make all vars records
+            cmd.append("--col");
+            if use_double: cmd.append("--double")
             if run_all: cmd.append("--all");
             if nocheck: cmd.append("--nocheck");
             print_cmd(cmd)
