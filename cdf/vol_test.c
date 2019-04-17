@@ -21,7 +21,7 @@
 
 #define NDIMS         3
 #define DIMLEN        2
-#define NUM_VARS      1
+#define NUM_VARS      2
 
 /* Helper function to handle errors */
 static void handle_error(int status, int lineno)
@@ -57,7 +57,7 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 
 	char str[512];
 	int i, j, rank, nprocs, ncid, bufsize, err, nerrs=0;
-	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS+1], varids[NUM_VARS];
+	int *buf[NUM_VARS], psizes[NDIMS], dimids[NDIMS], varids[NUM_VARS];
 	double write_timing, max_write_timing, write_bw;
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset write_size, sum_write_size;
@@ -68,6 +68,8 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
 	int *buf_rec[NUM_VARS], psizes_rec[NDIMS];
 	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
+	int dimids_rec[NDIMS];
+
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -77,10 +79,11 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 		for (i=0; i<NDIMS; i++)
 			psizes_rec[i] = 0;
 		MPI_Dims_create(nprocs, (NDIMS-1), &psizes_rec[1]);
+		psizes_rec[0] = 1;
+		starts_rec[0] = 0;
 		starts_rec[1] = (rank / psizes_rec[2]) % psizes_rec[1];
 		starts_rec[2] = rank % psizes_rec[2];
 		bufsize = 1;
-		psizes_rec[0] = 1;
 		starts_rec[0] = 0;
 		counts_rec[0] = 1;
 		for (i=1; i<NDIMS; i++) {
@@ -93,21 +96,20 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 			buf_rec[i] = (int *) malloc(bufsize * sizeof(int));
 			for (j=0; j<bufsize; j++) buf_rec[i][j] = (rank+1 + (i*1000))*fmult;
 		}
-
-		//for (j=0; j<NDIMS; j++)
-		//	printf(" (1) [%d] psizes_rec[%d] = %d, starts_rec[%d] = %lld, counts_rec[%d] = %lld\n", rank, j, psizes_rec[j], j, starts_rec[j], j, counts_rec[j]);
 	}
 
 	/* Now, setup non-record-variable layout (3-Dimensional) */
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
-	MPI_Dims_create(nprocs, NDIMS, psizes);
+	MPI_Dims_create(nprocs, (NDIMS-1), &psizes[1]);
+	psizes[0] = 1;
 	starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
 	starts[1] = (rank / psizes[2]) % psizes[1];
 	starts[2] = rank % psizes[2];
 	bufsize = 1;
 	for (i=0; i<NDIMS; i++) {
 		gsizes[i] = (MPI_Offset)len * psizes[i];
+		//printf("gsizes[%d] = %lld\n",i,gsizes[i]);
 		starts[i] *= len;
 		counts[i]  = len;
 		bufsize   *= len;
@@ -129,15 +131,17 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	}
 
 	/* define dimensions */
-	for (i=0; i<(NDIMS+1); i++) {
+	for (i=0; i<NDIMS; i++) {
 		if (i==0) {
 			/* Define the record dimension */
-			err = ncmpi_def_dim(ncid, "REC_DIM", NC_UNLIMITED, &dimids[0]);
+			err = ncmpi_def_dim(ncid, "REC_DIM", NC_UNLIMITED, &dimids_rec[0]);
 			handle_error(err, __LINE__);
-		} else {
-			sprintf(str, "x%d", i);
-			err = ncmpi_def_dim(ncid, str, gsizes[i-1], &dimids[i]);
-			handle_error(err, __LINE__);
+		}
+		sprintf(str, "x%d", i);
+		err = ncmpi_def_dim(ncid, str, gsizes[i], &dimids[i]);
+		handle_error(err, __LINE__);
+		if (i > 0) {
+			dimids_rec[i] = dimids[i];
 		}
 	}
 
@@ -145,11 +149,11 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 	for (i=0; i<NUM_VARS; i++) {
 		if (i<nrecords) {
 			sprintf(str, "recvar%d", i);
-			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, &dimids[0], &varids[i]);
+			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids_rec, &varids[i]);
 			handle_error(err, __LINE__);
 		} else {
 			sprintf(str, "var%d", i);
-			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, &dimids[1], &varids[i]);
+			err = ncmpi_def_var(ncid, str, NC_INT, NDIMS, dimids, &varids[i]);
 			handle_error(err, __LINE__);
 		}
 	}
@@ -190,7 +194,7 @@ int write_cdf_col(MPI_Comm comm, char *filename, int cmode, int len, int fmult, 
 			if(j<(len-1)) starts_rec[0]++;
 		}
 		//MPI_Offset testlen;
-		//err = ncmpi_inq_dimlen(ncid, dimids[0], &testlen); handle_error(err, __LINE__);
+		//err = ncmpi_inq_dimlen(ncid, dimids_rec[0], &testlen); handle_error(err, __LINE__);
 		//printf("  Record-variable dimension size is now: %lld \n", testlen);
 	}
 
@@ -234,10 +238,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	double read_timing, max_read_timing, read_bw;
 	MPI_Offset gsizes[NDIMS], starts[NDIMS], counts[NDIMS];
 	MPI_Offset read_size, sum_read_size;
-
-	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
-	int psizes_rec[NDIMS];
-	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
+	int dimids_rec[NDIMS];
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -251,14 +252,16 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	}
 
 	/* Get dimensions */
-	for (i=0; i<(NDIMS+1); i++) {
+	for (i=0; i<NDIMS; i++) {
 		if (i==0) {
-			err = ncmpi_inq_dimid(ncid, "REC_DIM", &dimids[0]);
+			err = ncmpi_inq_dimid(ncid, "REC_DIM", &dimids_rec[0]);
 			handle_error(err, __LINE__);
-		} else {
-			sprintf(str, "x%d", i);
-			err = ncmpi_inq_dimid(ncid, str, &dimids[i]);
-			handle_error(err, __LINE__);
+		}
+		sprintf(str, "x%d", i);
+		err = ncmpi_inq_dimid(ncid, str, &dimids[i]);
+		handle_error(err, __LINE__);
+		if (i > 0) {
+			dimids_rec[i] = dimids[i];
 		}
 	}
 
@@ -277,32 +280,11 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 
 	for (i=0; i<NDIMS; i++)
 		psizes[i] = 0;
-
-	/* Setup record-variable layout (Each record is 2-Dimensional) */
-	if (nrecords > 0) {
-		for (i=0; i<NDIMS; i++)
-			psizes_rec[i] = 0;
-		MPI_Dims_create(nprocs, (NDIMS-1), &psizes_rec[1]);
-		starts_rec[1] = (rank / psizes_rec[2]) % psizes_rec[1];
-		starts_rec[2] = rank % psizes_rec[2];
-		psizes_rec[0] = 1;
-		starts_rec[0] = 0;
-		counts_rec[0] = len; /* Read all records at once */
-		for (i=1; i<NDIMS; i++) {
-			starts_rec[i] *= len;
-			counts_rec[i]  = len;
-		}
-
-		//for (j=0; j<NDIMS; j++)
-		//	printf(" (2) [%d] psizes_rec[%d] = %d, starts_rec[%d] = %lld, counts_rec[%d] = %lld\n", rank, j, psizes_rec[j], j, starts_rec[j], j, counts_rec[j]);
-
-	}
-
-	MPI_Dims_create(nprocs, NDIMS, psizes);
+	MPI_Dims_create(nprocs, (NDIMS-1), &psizes[1]);
+	psizes[0] = 1;
 	starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
 	starts[1] = (rank / psizes[2]) % psizes[1];
 	starts[2] = rank % psizes[2];
-
 	bufsize = 1;
 	for (i=0; i<NDIMS; i++) {
 		gsizes[i] = (MPI_Offset)len * psizes[i];
@@ -327,32 +309,13 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	/* read one variable at a time */
 	for (i=0; i<NUM_VARS; i++) {
 		if (collective==1) {
-			if (i<nrecords) {
-				/* read a subarray in collective mode */
-				err = ncmpi_get_vara_int_all(ncid, varids[i], starts_rec, counts_rec, buf[i]);
-				handle_error(err, __LINE__);
-			} else {
-				/* read a subarray in collective mode */
-				err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
-				handle_error(err, __LINE__);
-			}
+			/* read a subarray in collective mode */
+			err = ncmpi_get_vara_int_all(ncid, varids[i], starts, counts, buf[i]);
+			handle_error(err, __LINE__);
 		} else {
-			if (i<nrecords) {
-
-				//for (j=0; j<NDIMS; j++)
-				//	printf("  [%d] starts_rec[%d] = %lld, counts_rec[%d] = %lld\n", rank, j, starts_rec[j], j, counts_rec[j]);
-				//MPI_Offset testlen;
-				//err = ncmpi_inq_dimlen(ncid, dimids[0], &testlen); handle_error(err, __LINE__);
-				//printf("  [%d] testlen = %lld \n", rank, testlen);
-
-				/* read a subarray in independent mode */
-				err = ncmpi_get_vara_int(ncid, varids[i], starts_rec, counts_rec, buf[i]);
-				handle_error(err, __LINE__);
-			} else {
-				/* read a subarray in independent mode */
-				err = ncmpi_get_vara_int(ncid, varids[i], starts, counts, buf[i]);
-				handle_error(err, __LINE__);
-			}
+			/* read a subarray in independent mode */
+			err = ncmpi_get_vara_int(ncid, varids[i], starts, counts, buf[i]);
+			handle_error(err, __LINE__);
 		}
 	}
 
@@ -370,7 +333,7 @@ int read_cdf_col(MPI_Comm comm, char *filename, int len, int collective, float f
 	for (i=0; i<NUM_VARS; i++) {
 		for (j=0; j<bufsize; j++) {
 			if (buf[i][j] != ((rank+1 + (i*1000))*fmult)) {
-				printf("ERROR!!! --- [%d] buf[%d][%d] = %d\n", rank, i, j, buf[i][j]);
+				printf("PNETCDF ERROR!!! --- [%d] buf[%d][%d] = %d\n", rank, i, j, buf[i][j]);
 				break;
 			}
 		}
@@ -443,10 +406,6 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 	char attr_data[13];
 	char var_attr_data[13];
 	double read_bw;
-
-	/* Each record will be 2-Dimensional (Dim-0 will be the record dimension) */
-	int psizes_rec[NDIMS];
-	MPI_Offset starts_rec[NDIMS], counts_rec[NDIMS];
 
 	MPI_Comm_rank(comm, &rank);
 	MPI_Comm_size(comm, &nprocs);
@@ -527,24 +486,11 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 
 	if (read_hyper) {
 
-		/* Setup record-variable layout (Each record is 2-Dimensional) */
-		if (nrecords > 0) {
-			for (i=0; i<NDIMS; i++)
-				psizes_rec[i] = 0;
-			MPI_Dims_create(nprocs, (NDIMS-1), &psizes_rec[1]);
-			starts_rec[1] = (rank / psizes_rec[2]) % psizes_rec[1];
-			starts_rec[2] = rank % psizes_rec[2];
-			psizes_rec[0] = 1;
-			starts_rec[0] = 0;
-			for (i=1; i<NDIMS; i++) {
-				starts_rec[i] *= len;
-			}
-		}
-
 		/* Use MPI_Dims_create to choose hyperslab decomposition */
 		for (i=0; i<NDIMS; i++)
 			psizes[i] = 0;
-		MPI_Dims_create(nprocs, NDIMS, psizes);
+		MPI_Dims_create(nprocs, (NDIMS-1), &psizes[1]);
+		psizes[0] = 1;
 		starts[0] = (rank / (psizes[1] * psizes[2])) % psizes[0];
 		starts[1] = (rank / psizes[2]) % psizes[1];
 		starts[2] = rank % psizes[2];
@@ -576,17 +522,10 @@ int read_cdf_vol(MPI_Comm comm, char *filename, int len, int use_collective, int
 
 			/* Define hyperslab in the dataset. */
 			for (i=0; i<NDIMS; i++) {
-				if (var_id < nrecords) {
-					block[i] = dims_out[i] / psizes_rec[i];
-					stride[i] = block[i];
-					count[i] = 1;
-					offset[i] = starts_rec[i] * block[i];
-				} else {
-					block[i] = dims_out[i] / psizes[i];
-					stride[i] = block[i];
-					count[i] = 1;
-					offset[i] = starts[i] * block[i];
-				}
+				block[i] = dims_out[i] / psizes[i];
+				stride[i] = block[i];
+				count[i] = 1;
+				offset[i] = starts[i] * block[i];
 			}
 			status_h5 = H5Sselect_hyperslab (dataspace[var_id], H5S_SELECT_SET, offset, stride, count, block);
 
