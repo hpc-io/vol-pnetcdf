@@ -110,7 +110,7 @@ typedef struct cdf_var_t {
 	int is_record; /* This is a record variable */
 } cdf_var_t;
 
-/* The CDF VOL info object */
+/* The CDF VOL "file" object */
 typedef struct H5VL_cdf_t {
 	char *fname; /* Store the file name */
 	uint8_t fmt; /* CDF File Spec (1,2,5) */
@@ -209,7 +209,7 @@ static herr_t H5VL_cdf_group_get(void *obj, H5VL_group_get_t get_type, hid_t dxp
 /* Local variables */
 /*******************/
 
-/* Pass through VOL connector class struct */
+/* CDF VOL connector class struct */
 const H5VL_class_t H5VL_cdf_g = {
     H5VL_CDF_VERSION,                      /* version      */
     (H5VL_class_value_t)H5VL_CDF_VALUE,    /* value        */
