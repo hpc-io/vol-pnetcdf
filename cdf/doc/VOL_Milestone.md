@@ -33,11 +33,11 @@ To date, the most recent [development branch of the HDF5 library repository](htt
 
 ### CDF Schema Mapping
 
-The CDF file format is relatively well-suited for the HDF5 VOL interface, because both data models were designed with multidimensional arrays in mind. In CDF, these arrays are called *variables*, while in HDF5 they are called *datasets*. What makes the mapping even more convenient is the fact that the CDF data model is essentially a subset of HDF5.  The CDF data schema consists of two fundamental components (variables and attributes), while HDF5 consists of three (groups, datasets, and attributes).  Since CDF does not support any notion of hierarchical groups, the most straightforward strategy is to treat CDF variables as HDF5 datasets, and to treat all CDF files as if there is only one group (the **root** group). In CDF, attributes can either be global (attached to the file), or variable-local (attached to a variable). In HDF5 attributes can be attached to both 
+The CDF file format is relatively well-suited for the HDF5 VOL interface, because both data models were designed with multidimensional arrays in mind. In CDF, these arrays are called *variables*, while in HDF5 they are called *datasets*. What makes the mapping even more convenient is the fact that the CDF data model is essentially a subset of HDF5.  The CDF data schema consists of two fundamental components (variables and attributes), while HDF5 consists of three (groups, datasets, and attributes).  Since CDF does not support any notion of hierarchical groups, the most straightforward strategy is to treat CDF variables as HDF5 datasets, and to treat all CDF files as if there is only one group (the **root** group). In CDF, attributes can either be global (attached to the file), or variable-local (attached to a variable). 
 
 ![](cdf-layout.png)
 
-**Fig AAA** *General layout of a CDF-formatted file. The formatting calls for three general sections: (1) A file header containing all necessary metadata, (2) The non-record variable data, and (3) the record variable data.*
+**Fig 2** *General layout of a CDF-formatted file. The formatting calls for three general sections: (1) A file header containing all necessary metadata, (2) The non-record variable data, and (3) the record variable data.*
 
 ### Implementation Details
 
@@ -139,13 +139,13 @@ The creation/population of the `H5VL_cdf_t` object is performed by the `H5VL_cdf
 
 ![](record-layout.png)
 
-**Fig BBB** *Layout of non-record variables (top) and record variables (bottom) in a CDF-formatted file. For non-record variables, the entire variable is stored contiguously in the file, using row-major mapping of array elements.  For record variables, each record (containing one or more variables) is stored contiguously.*
+**Fig 3** *Layout of non-record variables (top) and record variables (bottom) in a CDF-formatted file. For non-record variables, the entire variable is stored contiguously in the file, using row-major mapping of array elements.  For record variables, each record (containing one or more variables) is stored contiguously.*
 
 ### CDFVL Example
 
 #### The CDFVL Benchmark (`npetcdf_vol/cdf/vol_test`)
 
-The CDFVL prototype has been developed along-side the `vol_test` benchmark, which compares the performance of the CDFVL with PnetCDF for the reading of a realistic data pattern. The benchmark is an extension/modification of the `collective_write.c` example, available in the [PnetCDF GitHub repository](https://github.com/Parallel-NetCDF/PnetCDF/blob/master/examples/C/collective_write.c). For each execution of the benchmark code, the following procedure is followed (with `NDIMS=3` and `NUM_VARS=2` by default):
+The CDFVL prototype has been developed along-side the `vol_test` benchmark, which compares the performance of the CDFVL with PnetCDF for the reading of a realistic data pattern from a **CDF-5** file. The benchmark is an extension/modification of the `collective_write.c` example, available in the [PnetCDF GitHub repository](https://github.com/Parallel-NetCDF/PnetCDF/blob/master/examples/C/collective_write.c). For each execution of the benchmark code, the following procedure is followed (with `NDIMS=3` and `NUM_VARS=2` by default):
 
 1. Using PnetCDF, create a new test file (**File #1**)
 2. Using `MPI_Dims_create` on the last `NDIMS-1` dimensions, choose the local position of each process in eacg global `NDIMS`-dimensional *variable* (we do not decompose the first dimension, in case this is a record variable).  For example, a 4-process run will result in a **1 x 2 x 2** decomposition of the global variables, where each process will contribute a local `NDIMS`-dimensional array (with the length of each dimension equal to the `--dimlen` command-line argument).
@@ -232,9 +232,11 @@ When the benchmark has finished running, the timing results will be be located i
 
 ### Performance
 
+As illustrated in **Fig 4**, the CDFVL prototype is typically less performant than PnetCDF for the parallel reading of three-dimensional variables from a CDF-5 file (using hyper-slab selections in HDF5). This is to be expected, since the CDFVL contains far fewer optimizations.
+
 ![](theta-results.png)
 
-**Fig CCC** *Performance results for the CDFVL prototype, using the `vol_test` benchmark on ALCF Theta. The results correspond to the average timing of 10 trials, with each trial using: 2MB per process (2 1MB variables), 1-8 nodes, 32 ppn, and 52 Lustre stripes (8MB stripe size).*
+**Fig 4** *Performance results for the CDFVL prototype, using the `vol_test` benchmark on ALCF Theta. The results correspond to the average timing of 10 trials, with each trial using: 2MB per process (2 1MB variables), 1-8 nodes, 32 ppn, and 52 Lustre stripes (8MB stripe size). Note that the CDF format is version 5 for these tests.*
 
 --
 
