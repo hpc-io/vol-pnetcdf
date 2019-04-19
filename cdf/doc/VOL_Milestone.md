@@ -2,9 +2,9 @@
 
 
 >**Richard Zamora, Venkatram Vishwanath & Paul Coffman**
-
+>
 >*Argonne National Laboratory*
-
+>
 >April 18th 2019
 
 
@@ -143,7 +143,7 @@ The creation/population of the `H5VL_cdf_t` object is performed by the `H5VL_cdf
 
 ### CDFVL Example
 
-#### The CDFVL Benchmark (`vol_test`)
+#### The CDFVL Benchmark (`npetcdf_vol/cdf/vol_test`)
 
 The CDFVL prototype has been developed along-side the `vol_test` benchmark, which compares the performance of the CDFVL with PnetCDF for the reading of a realistic data pattern. The benchmark is an extension/modification of the `collective_write.c` example, available in the [PnetCDF GitHub repository](https://github.com/Parallel-NetCDF/PnetCDF/blob/master/examples/C/collective_write.c). For each execution of the benchmark code, the following procedure is followed (with `NDIMS=3` and `NUM_VARS=2` by default):
 
@@ -170,12 +170,64 @@ To simplify the process of running the `vol_test` benchmark, I also included a u
 
 #### Building `vol_test`
 
-In order to build a CDFVL-enabled application, you must have access to a recent HDF5 library installation (including the VOL API). If such a library is not available on your system, you can clone/build/install from the [HDF5 BitBucket repository](https://bitbucket.hdfgroup.org/projects/HDFFV/repos/hdf5/browse) [7]. Instructions for building HDF5 on the ALCF Theta machine are available in the ExaHDF5 [BuildAndTest](https://xgitlab.cels.anl.gov/ExaHDF5/BuildAndTest/tree/master/Exerciser/Theta) xGitLab repository [11].
+In order to build a CDFVL-enabled application, you must have access to both MPI, and a recent HDF5 library installation (including the VOL API). If the required HDF5 library is not available on your system, you can clone/build/install from the [HDF5 BitBucket repository](https://bitbucket.hdfgroup.org/projects/HDFFV/repos/hdf5/browse) [7]. Instructions for building HDF5 on the ALCF Theta machine are available in the ExaHDF5 [BuildAndTest](https://xgitlab.cels.anl.gov/ExaHDF5/BuildAndTest/tree/master/Exerciser/Theta) xGitLab repository [11].
 
-To build the `vol_test` benchmark, you also need access to the PnetCDF library.  Although CDFVL does not require any CDF-based library to read a CDF-formatted file, the benchmark code uses PnetCDDF to *write* the test files (recall that CDFVL is a *read-only* connector).
+To build the `vol_test` benchmark, you also need access to the PnetCDF library.  Although CDFVL does not require any CDF-based library to read a CDF-formatted file, the benchmark code does use PnetCDDF to *write* the test files (recall that CDFVL is a *read-only* connector). On ALCF Theta, PnetCDF can be added to your environment by typing:
+
+```
+module load cray-parallel-netcdf
+```
+
+Once the proper HDF5 and PnetCDF libraries are available, building the `vol_test` benchmark should be as simple as cloning the `pnetcdf_vol` repository, and changing/using an existing Makefile in the `npetcdf_vol/cdf/MAKE` directory:
+
+```
+cd <desired-root>
+git clone https://xgitlab.cels.anl.gov/ExaHDF5/pnetcdf_vol.git
+cd pnetcdf_vol/cdf
+
+cp MAKE/Makefile.theta Makefile
+
+```
+
+After making sure that `MPICC`, `PNETCDF_INSTALL_DIR`, and `HDF5_INSTALL_DIR` are set correctly in `Makefile`:
+
+```
+make clean
+make
+make istall
+```
+
+After building/installing, the executable path should be `<desired-root>/npetcdf_vol/cdf/bin/vol_test.ex`
 
 #### Running `vol_test`
 
+Once `vol_test` is installed, it can be executed with the typical `mpirun` command (or `aprun` on Theta). For example:
+
+```
+mpirun -n 4 ./vol_test.ex --dimlen 64 --col
+```
+
+In order to simplify the benchmarking process, a wrapper script is also available at `<desired-root>/npetcdf_vol/cdf/run/submit-alcf.py`.  The script is designed for two specific systems, "theta" and "other,"  but it should be straightforward to add other systems (especially single node systems, or those using COBALT). To setup the script for your system, the following variables should be defined at the top of `submit-alcf.py` (before the `parser = argparse.ArgumentParser()` line):
+
+- `machine`: The machine the code is running on; Current options are "theta" or "other."  The "theta" option will use COBALT environment variables, and the `aprun` utility to execute the code.  The "other" option will use `mpirun`, and will not use COBALT variables.
+- `nranksmin`: The smallest number of ranks (processes) to execute the code with.  The wrapper will start with the maximum number of nodes, loop through the desired options, and then repeat the process after cutting the node-count in half. the wrapper will stop when the total number of ranks becomes less than `nranksmin`, or when the run would require less than a single node.
+- `benchname`: A unique string to identify/label the current benchmarking campaign.
+- `runroot`: The directory path where the CDF-formatted test files will be written for each benchmark.
+- `benchroot`: The full path to `<desired-root>/npetcdf_vol/cdf/`. 
+
+To submit the wrapper script to the COBALT queue on Theta, 
+
+```
+qsub -n <Node-Count> -t <Wall-Time> -A <Project> ./submit-alcf.py --ppn <Procs-Per-Node> --lfs_count <Lustre-Count> --lfs_size <Lustre-Size>
+```
+
+For 128 nodes, with 16 ppn and 32 1MB Lustre stripes, the command might be:
+
+```
+qsub -n 128 -t 120 -A datascience ./submit-alcf.py --ppn 16 --lfs_count 32 --lfs_size 1
+```
+
+When the benchmark has finished running, the timing results will be be located in a file called `<desired-root>/npetcdf_vol/cdf/run/results/<benchname>/count.32.size.1.nodes.128.ppn.16/results.<jobid>`.  The `bench_analysis.ipynb` Jupyter notebook, located in `<desired-root>/npetcdf_vol/cdf/run/`, can be used as a reference for parsing and plotting the data within a single `results.*` file. 
 
 
 ### Performance

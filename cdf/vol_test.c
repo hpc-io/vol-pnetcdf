@@ -13,7 +13,7 @@
  *    Author: R.J. Zamora
  *
  *    Use:  make clean; make
- *          rm *.h5 *.nc; mpirun -n 4 ./vol_test.ex --dimlen 128 --col
+ *          mpirun -n 4 ./vol_test.ex --dimlen 128 --col
  *
  *    NOTE: PNETCDF code for writing the file is from the github repository:
  *    https://github.com/Parallel-NetCDF/PnetCDF/blob/master/examples/C/collective_write.c
