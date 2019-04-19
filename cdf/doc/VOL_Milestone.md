@@ -1,4 +1,4 @@
-# HDF5 VOL Connector for CDF Files
+# HDF5 VOL Connector for CDF Files (CDFVL)
 
 
 >**Richard Zamora, Venkatram Vishwanath & Paul Coffman**
@@ -12,7 +12,7 @@
 
 ### Abstract
 
-*The HDF5 technology suite offers a rich data model and flexible API for high-performance I/O.  The library interface can be used to greatly simplify the task of performing parallel I/O on large multi-dimensional arrays.  For example, hyper-slab selections make it relatively straightforward to access non-contiguous data in parallel.  Since the API is particularly well-suited for multi-dimensional data, many of it's features are also well-suited for accessing data stored in the array-based [Common Data Format (CDF)](https://cdf.gsfc.nasa.gov/) [1], which is popular in the climate-modeling community.  For this work, we have implemented a new Virtual Object Layer (VOL) connector, enabling HDF5 to read files written by CDF-based libraries, such as [PnetCDF](http://cucis.ece.northwestern.edu/projects/PnetCDF/) [2]. The CDF VOL prototype allows users to read data from CDF-formatted files, without the need for additional CDF-based libraries,  using the HDF5 API.  In this document, we will discuss the details and performance of the CDF VOL connector prototype.*
+*The HDF5 technology suite offers a rich data model and flexible API for high-performance I/O.  The library interface can be used to greatly simplify the task of performing parallel I/O on large multi-dimensional arrays.  For example, hyper-slab selections make it relatively straightforward to access non-contiguous data in parallel.  Since the API is particularly well-suited for multi-dimensional data, many of it's features are also well-suited for accessing data stored in the array-based [Common Data Format (CDF)](https://cdf.gsfc.nasa.gov/) [1], which is popular in the climate-modeling community.  For this work, we have implemented a new Virtual Object Layer (VOL) connector, enabling HDF5 to read files written by CDF-based libraries, such as [PnetCDF](http://cucis.ece.northwestern.edu/projects/PnetCDF/) [2]. The CDF VOL (CDFVL) prototype allows users to read data from CDF-formatted files, without the need for additional CDF-based libraries,  using the HDF5 API.  In this document, we will discuss the details and performance of the CDFVL connector prototype.*
 
 --
 
@@ -20,7 +20,7 @@
 
 The [Common Data Format (CDF)](https://cdf.gsfc.nasa.gov/) [1] is a self-describing data format for the storage of both scalar and multidimensional data.  Like HDF5 [4], CDF aims to provide users with both performance and inter-platform portability. [Parallel netCDF (PnetCDF)](http://cucis.ece.northwestern.edu/projects/PnetCDF/) [2] is a parallel I/O library for accessing files stored in CDF-1, 2, and 5 formats.  It was originally introduced in 2003 as an alternative to the existing [Network Common Data Form (NetCDF)](https://www.unidata.ucar.edu/software/netcdf/) library from Unidata [3], which only allowed users to read and write CDF-formatted data in serial at the time.  Since the introduction of versions 4.0 and 4.1 of Unidata's library, netCDF has supported parallel I/O through both HDF5 and PnetCDF backends, respectively. This means that netCDF-4 is able to read and write files in either HDF5 or CDF format.
 
-The goal of this work is to enable read-only interoperability between the HDF5 library and CDF-formatted data.  To this end, we have implemented a Virtual Object Layer (VOL) connector, allowing user applications to read CDF data using the HDF5 API.  In this document, we will present the implementation details of the CDF VOL prototype, and discuss opportunities to improve its functionality and performance in future iterations.  We also provide instructions for building and running a simple benchmark example.
+The goal of this work is to enable read-only interoperability between the HDF5 library and CDF-formatted data.  To this end, we have implemented a Virtual Object Layer (VOL) connector, allowing user applications to read CDF data using the HDF5 API.  In this document, we will present the implementation details of the CDF VOL (CDFVL) prototype, and discuss opportunities to improve its functionality and performance in future iterations.  We also provide instructions for building and running a simple benchmark example.
 
 ### The Virtual Object Layer in HDF5
 
@@ -41,7 +41,7 @@ The CDF file format is relatively well-suited for the HDF5 VOL interface, becaus
 
 ### Implementation Details
 
-The CDF VOL-Connector prototype discussed here is available in the public [`pnetcdf_vol`](https://xgitlab.cels.anl.gov/ExaHDF5/pnetcdf_vol) repository, hosted on xGitLab [10]. Most of the VOL-connector source code can be found in `/cdf/cdf_vol.c`, where the `H5VL_cdf_g` connector (of type `H5VL_class_t`) is defined as follows:
+The CDFVL-Connector prototype discussed here is available in the public [`pnetcdf_vol`](https://xgitlab.cels.anl.gov/ExaHDF5/pnetcdf_vol) repository, hosted on xGitLab [10]. Most of the VOL-connector source code can be found in `/cdf/cdf_vol.c`, where the `H5VL_cdf_g` connector (of type `H5VL_class_t`) is defined as follows:
 
 ```
 /* CDF VOL connector class struct */
@@ -94,7 +94,7 @@ In addition to the thirteen callback functions included within the `H5VL_cdf_g` 
 
 #### Parsing the File Header
 
-The typical procedure for using the CDF VOL connector to read a CDF-formatted file within a user application (once the connector is registered and added to the file-access property list) starts with the opening of the file (using `H5Dopen`).  When passed through the HDF5 VOL, the `H5Dopen` call is redirected to the `H5VL_cdf_file_open` function, which ultimately reads through the file header to populate a `H5VL_cdf_t` structure for the open file. Throughout the CDV VOL implementation, the following structures are used to organize the metadata that is read-in from the file header:
+The typical procedure for using the CDFVL connector to read a CDF-formatted file within a user application (once the connector is registered and added to the file-access property list) starts with the opening of the file (using `H5Dopen`).  When passed through the HDF5 VOL, the `H5Dopen` call is redirected to the `H5VL_cdf_file_open` function, which ultimately reads through the file header to populate a `H5VL_cdf_t` structure for the open file. Throughout the CDV VOL implementation, the following structures are used to organize the metadata that is read-in from the file header:
 
 - `H5VL_cdf_t`: Files
 - `cdf_var_t`: Variables
@@ -141,15 +141,48 @@ The creation/population of the `H5VL_cdf_t` object is performed by the `H5VL_cdf
 
 **Fig BBB** *Layout of non-record variables (top) and record variables (bottom) in a CDF-formatted file. For non-record variables, the entire variable is stored contiguously in the file, using row-major mapping of array elements.  For record variables, each record (containing one or more variables) is stored contiguously.*
 
+### CDFVL Example
+
+#### The CDFVL Benchmark (`vol_test`)
+
+The CDFVL prototype has been developed along-side the `vol_test` benchmark, which compares the performance of the CDFVL with PnetCDF for the reading of a realistic data pattern. The benchmark is an extension/modification of the `collective_write.c` example, available in the [PnetCDF GitHub repository](https://github.com/Parallel-NetCDF/PnetCDF/blob/master/examples/C/collective_write.c). For each execution of the benchmark code, the following procedure is followed (with `NDIMS=3` and `NUM_VARS=2` by default):
+
+1. Using PnetCDF, create a new test file (**File #1**)
+2. Using `MPI_Dims_create` on the last `NDIMS-1` dimensions, choose the local position of each process in eacg global `NDIMS`-dimensional *variable* (we do not decompose the first dimension, in case this is a record variable).  For example, a 4-process run will result in a **1 x 2 x 2** decomposition of the global variables, where each process will contribute a local `NDIMS`-dimensional array (with the length of each dimension equal to the `--dimlen` command-line argument).
+3. Using PnetCDF, write `NUM_VARS` variables to **File #1** in parallel, using the decomposition chosen in Step 2
+4. Using PnetCDF, create a second new test file (**file #2**), and use the procedure in Steps 2-3 to write `NUM_VARS` variables to **File #2** in parallel.  Note that elements of the variables depend on the process doing the writing, as well as the index of the variable (allowing validation after the read).
+5. Using PnetCDF, read back each of the `NUM_VARS` `NDIMS`-dimensional variables from **File #1**, using the same parallel decomposition that was used to write the data
+5. Using the HDF5 CDFVL prototype, read back each of the `NUM_VARS` `NDIMS`-dimensional variables from **File #2**, using the same parallel decomposition that was used to write the data
+
+Note that the benchmark also writes (using PnetCDF) and reads (using the CDFVL) global and variable attributes. The layout of this simple benchmark allows us to explore a variety of options, using the following command-line flags:
+
+- `--dimlen`: The length of each dimension for the local variables written/read by each process. Using `--dimlen 64` with the default setting of `NDIMS=3` will result in each process writing/reading a **64 x 64 x 64** array to/from each global variable [Default: 2]
+- `--fsroot`: The directory path where you want the CDF-formatted test files to be written (**NOTE**: Path must end in a `/` character) [Default: '']
+- `--col`: Use collective operations to read the data (otherwise, independent I/O is used) [Default: False]
+- `--all`: Times an `H5S_ALL`-selection read of the each variable using the CDFVL prototype only. This operation is much more efficient than reading hyper-slab selections, but it will result in all processes reading all global data (which takes a long time at scale) [Default: False]
+- `--keep`: Keep test files after reading them (don't delete the files) [Default: False]
+- `--nocheck`: Skip read validation (this will speed up the code at scale) [Default: False]
+- `--atts`: Print variable and file attributes [Default: False]
+- `--double`: Use double-precision values for all variables (otherwise integer values are used) [Default: False]
+- `--nrecords`: Set the number of variables (0-`NUM_VARS`) that should be written/read as record variables [Default: 0]
+
+To simplify the process of running the `vol_test` benchmark, I also included a useful python script (`submit-alcf.py`) in the xGitLab repo (see *Running `vol_test`* section below).
+
+#### Building `vol_test`
+
+In order to build a CDFVL-enabled application, you must have access to a recent HDF5 library installation (including the VOL API). If such a library is not available on your system, you can clone/build/install from the [HDF5 BitBucket repository](https://bitbucket.hdfgroup.org/projects/HDFFV/repos/hdf5/browse) [7]. Instructions for building HDF5 on the ALCF Theta machine are available in the ExaHDF5 [BuildAndTest](https://xgitlab.cels.anl.gov/ExaHDF5/BuildAndTest/tree/master/Exerciser/Theta) xGitLab repository [11].
+
+To build the `vol_test` benchmark, you also need access to the PnetCDF library.  Although CDFVL does not require any CDF-based library to read a CDF-formatted file, the benchmark code uses PnetCDDF to *write* the test files (recall that CDFVL is a *read-only* connector).
+
+#### Running `vol_test`
+
+
+
 ### Performance
-
-
 
 ![](theta-results.png)
 
-**Fig CCC** *Performance results for the CDF VOL prototype, using the `vol_test` benchmark on ALCF Theta. The results correspond to the average timing of 10 trials, with each trial using: 2MB per process (2 1MB variables), 1-8 nodes, 32 ppn, and 52 Lustre stripes (8MB stripe size).*
-
-### Building & Running the CDF VOL Benchmark
+**Fig CCC** *Performance results for the CDFVL prototype, using the `vol_test` benchmark on ALCF Theta. The results correspond to the average timing of 10 trials, with each trial using: 2MB per process (2 1MB variables), 1-8 nodes, 32 ppn, and 52 Lustre stripes (8MB stripe size).*
 
 --
 
@@ -191,3 +224,6 @@ http://cucis.ece.northwestern.edu/projects/PnetCDF/CDF-5.html
 
 [10] CDF VOL Repository:
 https://xgitlab.cels.anl.gov/ExaHDF5/pnetcdf_vol
+
+[11] HDF5-Theta Build Instructions:
+https://xgitlab.cels.anl.gov/ExaHDF5/BuildAndTest/tree/master/Exerciser/Theta
