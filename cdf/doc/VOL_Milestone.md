@@ -1,7 +1,7 @@
 # HDF5 VOL Connector for CDF Files (CDFVL)
 
 
->**Richard Zamora, Venkatram Vishwanath & Paul Coffman**
+>**Huihuo Zheng, Richard Zamora, Venkatram Vishwanath & Paul Coffman**
 >
 >*Argonne National Laboratory*
 >
@@ -237,15 +237,6 @@ As illustrated in **Fig 4**, the CDFVL prototype is typically less performant th
 ![](theta-results.png)
 
 **Fig 4** *Performance results for the CDFVL prototype, using the `vol_test` benchmark on ALCF Theta. The results correspond to the average timing of 10 trials, with each trial using: 2MB per process (2 1MB variables), 1-8 nodes, 32 ppn, and 52 Lustre stripes (8MB stripe size). Note that the CDF format is version 5 for these tests.*
-
---
-
-#### Missing Features (TODO)
-
-- Custom API calls were added to allow a user application to query the count and names of attributes and/or variables (`cdf_vol_var_get_attname`, `cdf_vol_var_get_natts`, `cdf_vol_file_get_nitems`, and `cdf_vol_file_get_iname`).  In the future, the same functionality should be implemented within the official VOL interface.
-- The `H5VL_DATASET_GET_TYPE` case needs to be added to the `H5VL_cdf_dataset_get` implementation. Otherwise, the user must know the datatype of the variable a priori.
-- Reading of hyper-slab selections can be further optimized for cases with simple/regular patterns.  For example, it may not be necessary to explicitly map the file-space selection to the memory-space selection if both cases are contiguous (and in the same order).
-- Need to test (and possibly debug) the code at scale (128+ nodes). Preliminary tests at scale (128+ nodes) show problematic behavior.
 
 #### References
 
